@@ -14,7 +14,6 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-
 #include "tensorrt_llm/executor/executorImpl.h"
 #include "tensorrt_llm/batch_manager/decoderBuffers.h"
 #include "tensorrt_llm/batch_manager/kvCacheUtils.h"
@@ -38,13 +37,25 @@
 #include "tensorrt_llm/runtime/loraCache.h"
 #include "tensorrt_llm/runtime/memoryCounters.h"
 #include "tensorrt_llm/runtime/utils/mpiUtils.h"
+#include <cstdlib>    // for free
+#include <cxxabi.h>   // for __cxa_demangle
+#include <dlfcn.h>    // for dladdr
+#include <execinfo.h> // for backtrace
+#include <memory>     // for unique_ptr
+#include <sstream>    // For std::stringstream
+#include <sstream>
+#include <string>
+#include <unistd.h> // For getpid()
 
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <cuda_profiler_api.h>
+#include <cxxabi.h> // For demangling C++ symbols
+#include <execinfo.h>
 #include <iterator>
 #include <optional>
+#include <sys/syscall.h>
 #include <utility>
 
 namespace
@@ -78,6 +89,128 @@ namespace tensorrt_llm::executor
 char const* version() noexcept
 {
     return kTensorRtLlmVersion;
+}
+
+// Helper function for demangling
+std::string demangle(char const* name)
+{
+    int status = -1; // some arbitrary value to indicate failure
+
+    // Use unique_ptr for RAII cleanup of demangledName
+    std::unique_ptr<char, void (*)(void*)> demangledName(abi::__cxa_demangle(name, nullptr, nullptr, &status),
+        std::free // Use std::free for C-style allocation from __cxa_demangle
+    );
+
+    // Check demangling status
+    // status == 0 means success
+    // status == -1 means invalid mangled name provided
+    // status == -2 means allocation failure
+    // status == -3 means invalid argument provided
+    if (status == 0 && demangledName)
+    {
+        return demangledName.get();
+    }
+    else
+    {
+        // Return the original name if demangling failed
+        return (name ? name : "[unknown symbol]");
+    }
+}
+
+/**
+ * @brief Generates a detailed stack trace.
+ *
+ * This version uses dladdr to find library information and calculates offsets,
+ * making it easier to use addr2line offline for file/line resolution.
+ *
+ * @param skipFrames The number of initial frames to skip (e.g., skip this function itself).
+ * @param maxFrames The maximum number of frames to capture.
+ * @return std::string A formatted string containing the detailed stack trace.
+ *
+ * @note Compile with -g (for debug symbols) and link with -ldl (for dladdr)
+ * and potentially -rdynamic (to resolve symbols in the main executable).
+ * @note This function is NOT async-signal-safe due to malloc/free in demangling,
+ * string operations, and potential non-reentrant behavior in dladdr.
+ * Do NOT call directly from a signal handler targeting crashes like SIGSEGV.
+ */
+std::string getDetailedStackTrace(int skipFrames = 1, int maxFrames = 64)
+{
+    if (maxFrames <= 0)
+    {
+        return "Invalid maxFrames specified";
+    }
+
+    // Ensure skipFrames doesn't exceed potential frames
+    // We allocate one extra slot because backtrace itself might be the first frame.
+    int const effectiveMaxFrames = maxFrames + skipFrames;
+    void* addrlist[effectiveMaxFrames];
+
+    int addrlen = backtrace(addrlist, effectiveMaxFrames);
+    if (addrlen <= skipFrames) // Check if addrlen is less than or equal to skipFrames
+    {
+        if (addrlen <= 0)
+        {
+            return "Failed to generate stack trace or stack is empty";
+        }
+        else
+        {
+            return "Stack trace shorter than skipFrames";
+        }
+    }
+
+    std::ostringstream trace;
+    trace << "Stack trace (" << addrlen - skipFrames << " frames):\n";
+
+    // Iterate from skipFrames up to the actual number of frames captured
+    for (int i = skipFrames; i < addrlen; ++i)
+    {
+        Dl_info info;
+        void const* addr = addrlist[i];
+        std::string line = "";
+
+        if (dladdr(addr, &info))
+        {
+            // Calculate offsets
+            // Offset from the start of the library/executable containing the symbol
+            const uintptr_t library_offset
+                = reinterpret_cast<uintptr_t>(addr) - reinterpret_cast<uintptr_t>(info.dli_fbase);
+            // Offset from the start of the nearest symbol found by dladdr
+            const uintptr_t symbol_offset = (info.dli_sname != nullptr && info.dli_saddr != nullptr)
+                ? reinterpret_cast<uintptr_t>(addr) - reinterpret_cast<uintptr_t>(info.dli_saddr)
+                : 0; // Assign 0 if symbol info is unavailable
+
+            // Demangle the symbol name if available
+            std::string demangled_symbol = demangle(info.dli_sname);
+
+            // Format the line
+            std::ostringstream line_stream;
+            line_stream << (info.dli_fname ? info.dli_fname : "[unknown module]") << " (" << demangled_symbol;
+            if (info.dli_sname != nullptr && info.dli_saddr != nullptr)
+            { // Only show symbol offset if symbol was found
+                line_stream << "+"
+                            << "0x" << std::hex << symbol_offset << std::dec;
+            }
+            line_stream << ") "
+                        // Display offset from library base, useful for addr2line
+                        << "[+"
+                        << "0x" << std::hex << library_offset << std::dec
+                        << "] "
+                        // Display the raw address
+                        << "[" << addr << "]";
+            line = line_stream.str();
+        }
+        else
+        {
+            // dladdr failed, fall back to basic address output
+            std::ostringstream line_stream;
+            line_stream << "[unknown module] [unknown symbol] [" << addr << "]";
+            line = line_stream.str();
+        }
+
+        trace << "#" << (i - skipFrames) << ": " << line << "\n";
+    }
+
+    return trace.str();
 }
 
 class CancelledRequestsAsyncSend
@@ -1654,22 +1787,50 @@ void Executor::Impl::terminateActiveRequests(RequestList& activeRequests, std::s
     }
 }
 
+int count = 0;
+
 void Executor::Impl::forwardSync(RequestList& activeRequests)
 {
+    count++;
     TLLM_LOG_TRACE("[RANK %d] %s start", COMM_SESSION.getRank(), __PRETTY_FUNCTION__);
+    /*
     try
     {
-        if (mEncoderModel)
-        {
-            mEncoderModel->forwardSync();
-        }
-        mModel->forwardSync();
+    */
+    if (mEncoderModel)
+    {
+        mEncoderModel->forwardSync();
+    }
+    int rank = COMM_SESSION.getRank();
+    if (rank == 0 && count == 2)
+    {
+        int pid = getpid();
+        std::thread::id threadId = std::this_thread::get_id();
+        // pid_t nativeThreadId = syscall(SYS_gettid); // Gets the Linux thread ID
+
+        std::stringstream ss;
+        ss << threadId;
+        std::string threadIdStr = ss.str();
+
+        std::cout << "*** rank" << rank << " pid: " << pid << " C++ threadId: " << threadIdStr << std::endl;
+        //<< " Native threadId (LWP): " << nativeThreadId << std::endl;
+        sleep(60);
+    }
+
+    std::cout << "rank" << COMM_SESSION.getRank() << " before forwardSync" << std::endl;
+    mModel->forwardSync();
+    std::cout << "rank" << COMM_SESSION.getRank() << " after forwardSync" << std::endl;
+    /*
     }
     catch (std::exception const& e)
     {
-        std::string const err = std::string("Encountered an error in forwardSync function: ") + e.what();
+        // Capture stack trace
+        std::string stackTrace = getDetailedStackTrace();
+        std::string const err = std::string("Encountered an error in forwardSync function: ") + e.what() +
+                               "\nStack trace:\n" + stackTrace;
         terminateActiveRequests(activeRequests, err);
     }
+    */
     TLLM_LOG_TRACE("[RANK %d] %s stop", COMM_SESSION.getRank(), __PRETTY_FUNCTION__);
 }
 

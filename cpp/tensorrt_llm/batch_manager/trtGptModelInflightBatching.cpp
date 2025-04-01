@@ -746,6 +746,8 @@ TrtGptModelInflightBatching::IterationStatsIFB TrtGptModelInflightBatching::fill
 
 void TrtGptModelInflightBatching::forwardSync()
 {
+    assert(false);
+
     TLLM_LOG_TRACE("%s start", __PRETTY_FUNCTION__);
     NVTX3_SCOPED_RANGE_WITH_NAME(range, "TrtGptModelInflightBatching::forwardSync");
 
