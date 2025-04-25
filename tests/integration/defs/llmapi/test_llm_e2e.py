@@ -46,6 +46,9 @@ def test_llmapi_quant_llama_70b(llm_root, engine_dir, llm_venv):
     llm_venv.run_cmd([str(script_path)], env=env)
 
 
+run_llm_path = os.path.join(os.path.dirname(__file__), "_run_llmapi_llm.py")
+
+
 @pytest.mark.parametrize("model_name,model_path", [
     ("llama", "llama-models-v2/llama-v2-7b-hf"),
 ])
