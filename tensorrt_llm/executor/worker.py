@@ -271,12 +271,19 @@ class ExecutorBindingsWorker(GenerationExecutor):
 
         return True  # success
 
+    count = 0
+
     def dispatch_stats_task(self) -> bool:
 
         # Define a Callable to join iteration and request stats
         def stats_serializer(
                 stats: Tuple[tllm.IterationStats, tllm.RequestStats]) -> str:
             iteration_stats, req_stats = stats
+            if self.count % 10 == 0:
+                logger.warning(
+                    f"iteration_stats [{self.count}] {req_stats} {iteration_stats.to_json_str()}"
+                )
+            self.count += 1
             stats_dict = json.loads(iteration_stats.to_json_str())
 
             if req_stats is not None and len(req_stats) > 0:
@@ -809,6 +816,7 @@ class AwaitResponseHelper:
             filter(
                 lambda _: _,
                 [self.worker._engine_response_callback(r) for r in responses]))
+        logger.warning(f"await responses count: {len(responses)}")
 
         with nvtx_range_debug(f"await_response-{len(responses)}",
                               color="red",
