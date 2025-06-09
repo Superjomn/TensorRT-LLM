@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from tensorrt_llm.llmapi.utils import print_colored
 import time
 from contextlib import asynccontextmanager
 from itertools import chain
@@ -14,6 +15,9 @@ from tensorrt_llm.bench.dataclasses.general import InferenceRequest
 from tensorrt_llm.bench.dataclasses.reporting import PerfItemTuple, StatsKeeper
 from tensorrt_llm.llmapi.llm import RequestOutput
 from tensorrt_llm.logger import logger
+
+# Global variable for tracking finished requests
+finished_count = 0
 
 
 class LlmManager:
@@ -47,6 +51,7 @@ class LlmManager:
         self.request_seen.set()
         sampling_params.max_tokens = request.output_tokens
 
+
         async with semaphore_guard(self._concurrency_semaphore):
             request_start_timestamp = time.perf_counter_ns()
             time_on_first_token = None
@@ -63,6 +68,12 @@ class LlmManager:
             else:
                 # Wait for the response to return to us.
                 response: RequestOutput = await output.aresult()
+
+            global finished_count
+            finished_count += 1
+
+            logger.warning(f"** finished {finished_count} requests")
+            print_colored(f"** finished {finished_count} requests\n", "red")
 
         response_end_timestamp = time.perf_counter_ns()
 

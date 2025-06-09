@@ -173,3 +173,19 @@ def test_PeftCacheConfig_declaration():
     assert pybind_config.device_cache_percent == 0.5
     assert pybind_config.host_cache_size == 1024
     assert pybind_config.lora_prefetch_dir == "."
+
+
+def test_llm_args_duplicate_key():
+    args = LlmArgs(model=llama_model_path,
+                   _num_post_process_workers=32,
+                   max_batch_size=1024)
+    print(args)
+    assert args._num_post_process_workers == 32
+    assert args.max_batch_size == 1024
+
+    from tensorrt_llm._torch.llm import LLM
+    llm = LLM(model=llama_model_path,
+              max_batch_size=1024,
+              _num_post_process_workers=32)
+    assert llm.args._num_post_process_workers == 32
+    assert llm.args.max_batch_size == 1024
