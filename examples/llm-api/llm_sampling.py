@@ -175,7 +175,7 @@ def run_all_demonstrations(model_path: Optional[str] = None):
     print("=" * 50)
 
     # Initialize LLM
-    llm = LLM(model=model_path or "microsoft/DialoGPT-medium",
+    llm = LLM(model=model_path or "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
               # You can change this to any model you have available
               )
 
@@ -220,7 +220,7 @@ def main(model: Optional[str], demo: str, prompt: Optional[str]):
     """
 
     # Initialize LLM
-    llm = LLM(model=model or "microsoft/DialoGPT-medium",
+    llm = LLM(model=model or "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
               # You can change this to any model you have available
               )
 
