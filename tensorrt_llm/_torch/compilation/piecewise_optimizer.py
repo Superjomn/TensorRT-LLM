@@ -209,7 +209,8 @@ class PiecewiseRunner(object):
                 i.data_ptr() for i in args if isinstance(i, torch.Tensor)
             ]
             runtime_output_addresses = [
-                i.data_ptr() for i in output if isinstance(i, torch.Tensor)
+                i.data_ptr() for i in entry.output
+                if isinstance(i, torch.Tensor)
             ]
 
             assert (entry.input_addresses == runtime_input_addresses
