@@ -358,18 +358,23 @@ class TestRpcTimeout:
             time.sleep(delay)
             return "completed"
 
-    def setup_method(self):
+    def setup_method(self, method):
         """Setup RPC server and client for timeout tests."""
+        # Use unique address based on the test parameter to avoid socket conflicts
+        test_name = method.__name__
+        self.address = f"ipc:///tmp/rpc_test_timeout_{test_name}_{id(self)}"
         self.server = RPCServer(self.App())
-        self.server.bind("ipc:///tmp/rpc_test_timeout")
+        self.server.bind(self.address)
         self.server.start()
         time.sleep(0.1)
-        self.client = RPCClient("ipc:///tmp/rpc_test_timeout")
+        self.client = RPCClient(self.address)
 
     def teardown_method(self):
         """Shutdown server and close client."""
         self.client.close()
         self.server.shutdown()
+        # Add a small delay to ensure the socket is fully released before the next test
+        time.sleep(0.5)
 
     def run_sync_timeout_test(self):
         with pytest.raises(RPCTimeout) as exc_info:

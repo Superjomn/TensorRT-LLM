@@ -89,6 +89,11 @@ class RPCClient:
             self._loop_thread = None
         if self._executor:
             self._executor.shutdown(wait=True)
+
+        if self._client_socket:
+            self._client_socket.close()
+            self._client_socket = None
+
         logger.debug("RPC Client closed")
 
     async def _response_reader(self):
