@@ -58,6 +58,12 @@ class RpcWorker(WorkerBase):
         qsize = self._response_queue.qsize()
         return [self._response_queue.get() for _ in range(qsize)]
 
+    # for streaming performance
+    async def fetch_responses_async(self) -> list:
+        while not self.shutdown_event.is_set():
+            responses = self.fetch_responses()  # will block
+            yield responses  # batching the responses to opt IPC performance
+
     def shutdown(self):
         logger.debug(f"RPC worker {mpi_rank()} is shutting down")
         self.shutdown_event.set()

@@ -7,7 +7,7 @@ from concurrent.futures import ProcessPoolExecutor
 from test_worker_base import create_fake_executor_config
 
 from tensorrt_llm.executor.request import GenerationRequest
-from tensorrt_llm.executor.rpc import RPCClient
+from tensorrt_llm.executor.rpc import RPCClient, RPCParams
 from tensorrt_llm.executor.rpc_proxy import GenerationExecutorRpcProxy
 from tensorrt_llm.executor.rpc_worker import RpcWorker
 from tensorrt_llm.sampling_params import SamplingParams
@@ -43,14 +43,14 @@ class TestRpcWorker:
     def test_main_loop(self):
         pool, addr = self.create_tp1_worker_process()
         client = self.create_rpc_client(addr)
-        client.setup_engine(__rpc_timeout=120)
+        client.setup_engine(__rpc_params=RPCParams(timeout=120))
         time.sleep(1)
 
         def process_request():
             ret = client.submit(GenerationRequest(
                 prompt_token_ids=[3, 4, 5],
                 sampling_params=SamplingParams(max_tokens=10)),
-                                __rpc_need_response=False)
+                                __rpc_params=RPCParams(need_response=False))
             assert ret is None  # need_response = False
 
             print(f"submit result: {ret}")
@@ -69,7 +69,7 @@ class TestRpcWorker:
                 prompt_token_ids=[3, 4, 5],
                 sampling_params=SamplingParams(max_tokens=10),
                 streaming=True),
-                                __rpc_need_response=False)
+                                __rpc_params=RPCParams(need_response=False))
             assert ret is None
             print("submit result: ", ret)
 
@@ -80,7 +80,8 @@ class TestRpcWorker:
 
             while not results:
                 time.sleep(1)
-                results.extend(client.fetch_responses(__rpc_timeout=10))
+                results.extend(
+                    client.fetch_responses(__rpc_params=RPCParams(timeout=10)))
                 print(f"try fetch_responses result: {results}")
             print(f"fetch_responses result: {results}")
             assert results
@@ -90,7 +91,7 @@ class TestRpcWorker:
         process_request_streaming()
 
         print("call shutdown")
-        client.shutdown(__rpc_timeout=10)
+        client.shutdown(__rpc_params=RPCParams(timeout=10))
         pool.shutdown()
         client.close()
 
