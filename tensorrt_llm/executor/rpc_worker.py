@@ -104,6 +104,9 @@ class RpcWorker(BaseWorker):
         logger_debug(f"RpcWorker {mpi_rank()} is fetching responses async",
                      color="yellow")
 
+        # Use a short timeout if none provided to prevent blocking forever
+        timeout = timeout if timeout is not None else 0.1
+
         # First, await any pending responses without blocking the event loop
         responses = await asyncio.to_thread(self.fetch_responses,
                                             timeout=timeout)
@@ -122,14 +125,15 @@ class RpcWorker(BaseWorker):
     async def fetch_responses_loop_async(self) -> AsyncGenerator[list, None]:
         while not self.shutdown_event.is_set():
             responses = await self.fetch_responses_async()
-            if responses:  # Only yield if there are actual responses
-                logger_debug(
-                    f"RpcWorker {mpi_rank()} is yielding responses: {responses}",
-                    color="yellow")
-                yield responses  # batching the responses to opt IPC performance
-            else:
+            # Always yield to keep the stream alive, even with empty responses
+            logger_debug(
+                f"RpcWorker {mpi_rank()} is yielding responses: {responses}",
+                color="yellow")
+            yield responses  # batching the responses to opt IPC performance
+
+            if not responses:
                 # Small delay to prevent busy waiting when no responses
-                await asyncio.sleep(0)
+                await asyncio.sleep(0.001)
         logger_debug(
             f"RpcWorker {mpi_rank()} quitting fetch_responses_loop_async",
             color="yellow")
@@ -179,12 +183,19 @@ class RpcWorker(BaseWorker):
             yield data
 
     def setup_engine(self):
+        logger_debug(f"RPC worker {mpi_rank()} setup_engine called",
+                     color="yellow")
         # Force all the ranks to wait here, and start creating the executor simultaneously.
         # Only call barrier if we have multiple ranks to avoid hanging in single-process tests
         if mpi_comm().Get_size() > 1:
             mpi_comm().barrier()
 
-        super().setup_engine()
+        logger_debug(f"RPC worker {mpi_rank()} calling super().setup_engine()",
+                     color="yellow")
+        result = super().setup_engine()
+        logger_debug(f"RPC worker {mpi_rank()} setup_engine completed",
+                     color="yellow")
+        return result
 
     def shutdown(self):
         logger_debug(f"RPC worker {mpi_rank()} is shutting down",
@@ -208,6 +219,9 @@ class RpcWorker(BaseWorker):
         llm_args: Optional[BaseLlmArgs] = None,
         hf_model_dir: Optional[Path] = None,
         tokenizer: Optional[TokenizerBase] = None,
+        worker_init_status_queue_addr: Optional[tuple[str,
+                                                      Optional[bytes]]] = None,
+        ready_signal: Optional[bytes] = None,
         **kwargs,
     ) -> None:
         nvtx.push_range(f"RpcWorker.main_task_{mpi_rank()}", color="pink")
@@ -238,17 +252,53 @@ class RpcWorker(BaseWorker):
         else:
             logger_debug(f"Worker {mpi_rank()} is creating the RPC service",
                          color="yellow")
-            # Step 2: Create the RPC service, it will expose all the APIs of the worker as remote call to the client
-            # Set num_workers to larger than 1 since there are some streaming tasks runs infinitely, such as await_responses_async.
-            rpc_server = RPCServer(worker, num_workers=RpcWorker.NUM_WORKERS)
-            rpc_server.bind(rpc_addr)
-            rpc_server.start()
 
-            # Step 3: Wait for the worker to shutdown
-            logger_debug(
-                f"Worker {mpi_rank()} is waiting for the worker to shutdown")
-            worker.shutdown_event.wait()
-            rpc_server.shutdown()
+            # Setup init status queue if provided
+            worker_init_status_queue = None
+            if worker_init_status_queue_addr:
+                import traceback
+
+                import zmq
+
+                from .ipc import IpcQueue
+                worker_init_status_queue = IpcQueue(
+                    worker_init_status_queue_addr,
+                    is_server=False,
+                    socket_type=zmq.DEALER,
+                    name="rpc_worker_init_status_queue")
+
+            try:
+                # Step 2: Create the RPC service, it will expose all the APIs of the worker as remote call to the client
+                # Set num_workers to larger than 1 since there are some streaming tasks runs infinitely, such as await_responses_async.
+                rpc_server = RPCServer(worker,
+                                       num_workers=RpcWorker.NUM_WORKERS)
+                rpc_server.bind(rpc_addr)
+                rpc_server.start()
+
+                # Send ready signal to proxy
+                if worker_init_status_queue and ready_signal:
+                    logger_debug(f"Sending ready signal to proxy...")
+                    ready_msg = (ready_signal, None)
+                    worker_init_status_queue.put(ready_msg)
+                    # Wait for ACK
+                    ack = worker_init_status_queue.get()
+                    logger_debug(f"Got ACK from proxy: {ack}")
+                    worker_init_status_queue.close()
+
+                # Step 3: Wait for the worker to shutdown
+                logger_debug(
+                    f"Worker {mpi_rank()} is waiting for the worker to shutdown"
+                )
+                worker.shutdown_event.wait()
+                rpc_server.shutdown()
+
+            except Exception as e:
+                logger.error(f"RPC worker initialization failed: {e}")
+                if worker_init_status_queue:
+                    error_msg = (e, traceback.format_exc())
+                    worker_init_status_queue.put(error_msg)
+                    worker_init_status_queue.close()
+                raise
 
     def __enter__(self):
         return self

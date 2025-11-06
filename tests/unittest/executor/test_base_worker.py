@@ -41,6 +41,7 @@ def create_fake_executor_config(engine_path, tp_size: int = 1):
         max_seq_len=2048,  # Set reasonable max sequence length
         max_batch_size=8,  # Set reasonable batch size for tests
         max_num_tokens=2048,  # Set reasonable max tokens
+        enable_autotuner=False,  # Disable autotuning for faster tests
     )
     # executor_config is not needed for PyTorch backend
     executor_config = None
@@ -55,6 +56,7 @@ class FakeWorker(BaseWorker):
             tensor_parallel_size=tp_size,
             backend='pytorch',
             enable_iter_perf_stats=True,
+            enable_autotuner=False,  # Disable autotuning for faster tests
         )
         super().__init__(
             engine=engine,

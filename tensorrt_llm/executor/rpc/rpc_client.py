@@ -4,6 +4,8 @@ import threading
 import uuid
 from typing import Any, AsyncIterator, Callable, Optional
 
+import zmq
+
 from ..._utils import nvtx_mark_debug
 from ...llmapi.utils import enable_llmapi_debug, logger_debug
 from ...logger import logger
@@ -123,7 +125,8 @@ class RPCClient:
         self._client_socket = ZeroMqQueue(address=(address, hmac_key),
                                           is_server=False,
                                           is_async=True,
-                                          use_hmac_encryption=False)
+                                          use_hmac_encryption=False,
+                                          socket_type=zmq.DEALER)
         # Store futures directly without loop references
         self._pending_futures: dict[str, asyncio.Future] = {}
         # Use asyncio.Queue for streaming responses
