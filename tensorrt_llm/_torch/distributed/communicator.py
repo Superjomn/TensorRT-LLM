@@ -10,6 +10,8 @@ import torch.distributed as dist
 from torch.distributed.distributed_c10d import (_object_to_tensor,
                                                 _tensor_to_object)
 
+from tensorrt_llm._utils import nvtx_range_debug
+
 try:
     from mpi4py import MPI
 except Exception:
@@ -346,35 +348,56 @@ class MPIDist(Distributed):
         self.create_cp_comm()
 
     def broadcast(self, obj, root=0, chunk_size: int = 4 * 1024 * 1024):
-        comm = mpi_comm()
-        return safe_broadcast(comm, obj, root=root, chunk_size=chunk_size)
+        with nvtx_range_debug("MPIDist.broadcast",
+                              color="purple",
+                              domain="mpi4py"):
+            comm = mpi_comm()
+            return safe_broadcast(comm, obj, root=root, chunk_size=chunk_size)
 
     def allgather(self, obj):
-        return mpi_allgather(obj)
+        with nvtx_range_debug("MPIDist.allgather",
+                              color="purple",
+                              domain="mpi4py"):
+            return mpi_allgather(obj)
 
     def barrier(self):
-        mpi_barrier()
+        with nvtx_range_debug("MPIDist.barrier",
+                              color="purple",
+                              domain="mpi4py"):
+            mpi_barrier()
 
     def isend(self, buf: np.ndarray, dest, tag=0):
         # non-blocking send numpy buffer
-        return mpi_isend(buf, dest, tag)
+        with nvtx_range_debug("MPIDist.isend", color="purple", domain="mpi4py"):
+            return mpi_isend(buf, dest, tag)
 
     def send(self, buf: np.ndarray, dest, tag=0):
         # blocking send numpy buffer
-        mpi_send(buf, dest, tag)
+        with nvtx_range_debug("MPIDist.send", color="purple", domain="mpi4py"):
+            mpi_send(buf, dest, tag)
 
     def recv(self, buf: np.ndarray, src, tag=0):
         # in-place recv numpy buffer
-        return mpi_recv(buf, src, tag)
+        with nvtx_range_debug("MPIDist.recv", color="purple", domain="mpi4py"):
+            return mpi_recv(buf, src, tag)
 
     def send_object(self, obj, dest, tag=0):
-        mpi_send_object(obj, dest, tag)
+        with nvtx_range_debug("MPIDist.send_object",
+                              color="purple",
+                              domain="mpi4py"):
+            mpi_send_object(obj, dest, tag)
 
     def isend_object(self, obj, dest, tag=0):
-        return mpi_isend_object(obj, dest, tag)
+        with nvtx_range_debug("MPIDist.isend_object",
+                              color="purple",
+                              domain="mpi4py"):
+            return mpi_isend_object(obj, dest, tag)
 
     def recv_object(self, src, tag=0):
-        return mpi_recv_object(src, tag)
+        with nvtx_range_debug("MPIDist.recv_object",
+                              color="purple",
+                              domain="mpi4py"):
+            return mpi_recv_object(src, tag)
 
     def create_tp_comm(self):
         new_group = mpi_comm().group.Incl(self.mapping.tp_group)
@@ -389,27 +412,48 @@ class MPIDist(Distributed):
         self.cp_comm = mpi_comm().Create_group(new_group)
 
     def cp_allgather(self, obj):
-        return self.cp_comm.allgather(obj)
+        with nvtx_range_debug("MPIDist.cp_allgather",
+                              color="purple",
+                              domain="mpi4py"):
+            return self.cp_comm.allgather(obj)
 
     def tp_allgather(self, obj):
-        return self.tp_comm.allgather(obj)
+        with nvtx_range_debug("MPIDist.tp_allgather",
+                              color="purple",
+                              domain="mpi4py"):
+            return self.tp_comm.allgather(obj)
 
     def tp_gather(self, obj, root=0, chunk_size: int = 4 * 1024 * 1024):
-        comm = self.tp_comm
-        return safe_gather(comm, obj, root=root, chunk_size=chunk_size)
+        with nvtx_range_debug("MPIDist.tp_gather",
+                              color="purple",
+                              domain="mpi4py"):
+            comm = self.tp_comm
+            return safe_gather(comm, obj, root=root, chunk_size=chunk_size)
 
     def tp_broadcast(self, obj, root=0, chunk_size: int = 4 * 1024 * 1024):
-        comm = self.tp_comm
-        return safe_broadcast(comm, obj, root=root, chunk_size=chunk_size)
+        with nvtx_range_debug("MPIDist.tp_broadcast",
+                              color="purple",
+                              domain="mpi4py"):
+            comm = self.tp_comm
+            return safe_broadcast(comm, obj, root=root, chunk_size=chunk_size)
 
     def pp_allgather(self, obj):
-        return self.pp_comm.allgather(obj)
+        with nvtx_range_debug("MPIDist.pp_allgather",
+                              color="purple",
+                              domain="mpi4py"):
+            return self.pp_comm.allgather(obj)
 
     def pp_gather(self, obj):
-        return self.pp_comm.gather(obj)
+        with nvtx_range_debug("MPIDist.pp_gather",
+                              color="purple",
+                              domain="mpi4py"):
+            return self.pp_comm.gather(obj)
 
     def pp_broadcast(self, obj, root=0):
-        return self.pp_comm.bcast(obj, root)
+        with nvtx_range_debug("MPIDist.pp_broadcast",
+                              color="purple",
+                              domain="mpi4py"):
+            return self.pp_comm.bcast(obj, root)
 
 
 class MultiHandleWrapper:
@@ -532,11 +576,17 @@ class TorchDist(Distributed):
 
         if mpi_disabled():
             if isinstance(obj, torch.Tensor):
-                dist.broadcast(obj, src=root)
+                with nvtx_range_debug("TorchDist.broadcast",
+                                      color="blue",
+                                      domain="torch.dist"):
+                    dist.broadcast(obj, src=root)
                 return obj
             else:
                 obj_list = [obj]
-                dist.broadcast_object_list(obj_list, src=root)
+                with nvtx_range_debug("TorchDist.broadcast_object_list",
+                                      color="blue",
+                                      domain="torch.dist"):
+                    dist.broadcast_object_list(obj_list, src=root)
                 return obj_list[0]
 
         if self.mapping.has_cp_ulysses():
@@ -550,22 +600,34 @@ class TorchDist(Distributed):
             output_list = [
                 torch.empty_like(obj) for _ in range(self.world_size)
             ]
-            dist.all_gather(output_list, obj)
+            with nvtx_range_debug("TorchDist.all_gather",
+                                  color="green",
+                                  domain="torch.dist"):
+                dist.all_gather(output_list, obj)
             return output_list
         else:
             obj_list = [None] * self.world_size
-            dist.all_gather_object(obj_list, obj)
+            with nvtx_range_debug("TorchDist.all_gather_object",
+                                  color="green",
+                                  domain="torch.dist"):
+                dist.all_gather_object(obj_list, obj)
             return obj_list
 
     @log_op
     def barrier(self):
-        dist.barrier()
+        with nvtx_range_debug("TorchDist.barrier",
+                              color="red",
+                              domain="torch.dist"):
+            dist.barrier()
 
     @log_op
     def isend(self, buf: np.ndarray, dest, tag=0):
         # non-blocking send numpy buffer
         tensor = torch.from_numpy(buf)
-        return dist.isend(tensor, dst=dest, tag=tag)
+        with nvtx_range_debug("TorchDist.isend",
+                              color="yellow",
+                              domain="torch.dist"):
+            return dist.isend(tensor, dst=dest, tag=tag)
 
     @log_op
     def send(self, buf: np.ndarray, dest, tag=0):
@@ -576,33 +638,45 @@ class TorchDist(Distributed):
     def recv(self, buf: np.ndarray, src, tag=0):
         # in-place recv numpy buffer
         tensor = torch.empty_like(torch.from_numpy(buf))
-        dist.recv(tensor, src=src, tag=tag)
+        with nvtx_range_debug("TorchDist.recv",
+                              color="yellow",
+                              domain="torch.dist"):
+            dist.recv(tensor, src=src, tag=tag)
         return tensor.numpy()
 
     @log_op
     def isend_tensor(self, tensor: torch.Tensor, dest, tag=0):
-        return dist.isend(tensor, dst=dest, tag=tag)
+        with nvtx_range_debug("TorchDist.isend_tensor",
+                              color="yellow",
+                              domain="torch.dist"):
+            return dist.isend(tensor, dst=dest, tag=tag)
 
     @log_op
     def recv_tensor(self, tensor: torch.Tensor, src, tag=0):
-        dist.recv(tensor, src=src, tag=tag)
+        with nvtx_range_debug("TorchDist.recv_tensor",
+                              color="yellow",
+                              domain="torch.dist"):
+            dist.recv(tensor, src=src, tag=tag)
         return tensor
 
     @log_op
     def recv_object(self, src, tag=0):
-        size_tensor = torch.tensor([0], dtype=torch.int32)
-        torch.distributed.recv(size_tensor,
-                               src=src,
-                               tag=tag,
-                               group=torch.distributed.group.WORLD)
-        bytes_size = size_tensor.item()
-        recv_tensor = torch.empty(bytes_size, dtype=torch.uint8)
-        torch.distributed.recv(recv_tensor,
-                               src=src,
-                               tag=tag,
-                               group=torch.distributed.group.WORLD)
-        return _tensor_to_object(recv_tensor, bytes_size,
-                                 torch.distributed.group.WORLD)
+        with nvtx_range_debug("TorchDist.recv_object",
+                              color="cyan",
+                              domain="torch.dist"):
+            size_tensor = torch.tensor([0], dtype=torch.int32)
+            torch.distributed.recv(size_tensor,
+                                   src=src,
+                                   tag=tag,
+                                   group=torch.distributed.group.WORLD)
+            bytes_size = size_tensor.item()
+            recv_tensor = torch.empty(bytes_size, dtype=torch.uint8)
+            torch.distributed.recv(recv_tensor,
+                                   src=src,
+                                   tag=tag,
+                                   group=torch.distributed.group.WORLD)
+            return _tensor_to_object(recv_tensor, bytes_size,
+                                     torch.distributed.group.WORLD)
 
     @log_op
     def send_object(self, obj, dest, tag=0):
@@ -611,28 +685,35 @@ class TorchDist(Distributed):
 
     @log_op
     def isend_object(self, obj, dest, tag=0):
-        input_tensor, local_size = _object_to_tensor(
-            obj, torch.device("cpu"), torch.distributed.group.WORLD)
+        with nvtx_range_debug("TorchDist.isend_object",
+                              color="cyan",
+                              domain="torch.dist"):
+            input_tensor, local_size = _object_to_tensor(
+                obj, torch.device("cpu"), torch.distributed.group.WORLD)
 
-        # Send object size
-        works = []
-        works.append(
-            torch.distributed.isend(torch.tensor([local_size],
-                                                 dtype=torch.int32),
-                                    dst=dest,
-                                    tag=tag))
-        works.append(torch.distributed.isend(input_tensor, dst=dest, tag=tag))
-        return MultiHandleWrapper(works)
+            # Send object size
+            works = []
+            works.append(
+                torch.distributed.isend(torch.tensor([local_size],
+                                                     dtype=torch.int32),
+                                        dst=dest,
+                                        tag=tag))
+            works.append(
+                torch.distributed.isend(input_tensor, dst=dest, tag=tag))
+            return MultiHandleWrapper(works)
 
     @log_op
     def recv_object_from_isend(self, src, tag):
-        size_tensor = torch.tensor([0], dtype=torch.int32)
-        torch.distributed.recv(size_tensor, src=src, tag=tag)
-        bytes_size = size_tensor.item()
-        recv_tensor = torch.empty(bytes_size, dtype=torch.uint8)
-        torch.distributed.recv(recv_tensor, src=src, tag=tag)
-        return _tensor_to_object(recv_tensor, bytes_size,
-                                 torch.distributed.group.WORLD)
+        with nvtx_range_debug("TorchDist.recv_object_from_isend",
+                              color="cyan",
+                              domain="torch.dist"):
+            size_tensor = torch.tensor([0], dtype=torch.int32)
+            torch.distributed.recv(size_tensor, src=src, tag=tag)
+            bytes_size = size_tensor.item()
+            recv_tensor = torch.empty(bytes_size, dtype=torch.uint8)
+            torch.distributed.recv(recv_tensor, src=src, tag=tag)
+            return _tensor_to_object(recv_tensor, bytes_size,
+                                     torch.distributed.group.WORLD)
 
     @log_op
     def allreduce(self,
@@ -642,7 +723,10 @@ class TorchDist(Distributed):
         if is_base_type:
             obj = torch.tensor(obj)
 
-        dist.all_reduce(obj, op=op)
+        with nvtx_range_debug("TorchDist.all_reduce",
+                              color="magenta",
+                              domain="torch.dist"):
+            dist.all_reduce(obj, op=op)
 
         if is_base_type:
             obj = obj.item()
@@ -656,13 +740,21 @@ class TorchDist(Distributed):
                 torch.empty_like(obj)
                 for _ in range(self.mapping.tp_group_pg.size())
             ]
-            dist.all_gather(output_list, obj, group=self.mapping.tp_group_pg)
+            with nvtx_range_debug("TorchDist.tp_all_gather",
+                                  color="green",
+                                  domain="torch.dist"):
+                dist.all_gather(output_list,
+                                obj,
+                                group=self.mapping.tp_group_pg)
             return output_list
         else:
             output_list = [None] * self.mapping.tp_group_pg.size()
-            dist.all_gather_object(output_list,
-                                   obj,
-                                   group=self.mapping.tp_group_pg)
+            with nvtx_range_debug("TorchDist.tp_all_gather_object",
+                                  color="green",
+                                  domain="torch.dist"):
+                dist.all_gather_object(output_list,
+                                       obj,
+                                       group=self.mapping.tp_group_pg)
             return output_list
 
     @log_op
@@ -676,10 +768,13 @@ class TorchDist(Distributed):
                 ]
             else:
                 output_list = None
-            dist.gather(obj,
-                        output_list,
-                        dst=dst,
-                        group=self.mapping.tp_group_pg)
+            with nvtx_range_debug("TorchDist.tp_gather",
+                                  color="green",
+                                  domain="torch.dist"):
+                dist.gather(obj,
+                            output_list,
+                            dst=dst,
+                            group=self.mapping.tp_group_pg)
             return output_list
         else:
             output_list = [None] * self.mapping.tp_group_pg.size()
@@ -687,24 +782,33 @@ class TorchDist(Distributed):
                 output_list = [None] * self.mapping.tp_group_pg.size()
             else:
                 output_list = None
-            dist.gather_object(obj,
-                               output_list,
-                               dst=dst,
-                               group=self.mapping.tp_group_pg)
+            with nvtx_range_debug("TorchDist.tp_gather_object",
+                                  color="green",
+                                  domain="torch.dist"):
+                dist.gather_object(obj,
+                                   output_list,
+                                   dst=dst,
+                                   group=self.mapping.tp_group_pg)
             return output_list
 
     @log_op
     def tp_broadcast(self, obj, root=0):
         if isinstance(obj, torch.Tensor):
-            dist.broadcast(obj, src=root, group=self.mapping.tp_group_pg)
+            with nvtx_range_debug("TorchDist.tp_broadcast",
+                                  color="blue",
+                                  domain="torch.dist"):
+                dist.broadcast(obj, src=root, group=self.mapping.tp_group_pg)
             return obj
         else:
             ret = [obj]
-            torch.distributed.broadcast_object_list(
-                ret,
-                src=root,
-                group=self.mapping.tp_group_pg,
-                device=torch.device("cpu"))
+            with nvtx_range_debug("TorchDist.tp_broadcast_object_list",
+                                  color="blue",
+                                  domain="torch.dist"):
+                torch.distributed.broadcast_object_list(
+                    ret,
+                    src=root,
+                    group=self.mapping.tp_group_pg,
+                    device=torch.device("cpu"))
             return ret[0]
 
     @log_op
@@ -714,13 +818,21 @@ class TorchDist(Distributed):
                 torch.empty_like(obj)
                 for _ in range(self.mapping.pp_group_pg.size())
             ]
-            dist.all_gather(output_list, obj, group=self.mapping.pp_group_pg)
+            with nvtx_range_debug("TorchDist.pp_all_gather",
+                                  color="green",
+                                  domain="torch.dist"):
+                dist.all_gather(output_list,
+                                obj,
+                                group=self.mapping.pp_group_pg)
             return output_list
         else:
             output_list = [None] * self.mapping.pp_group_pg.size()
-            dist.all_gather_object(output_list,
-                                   obj,
-                                   group=self.mapping.pp_group_pg)
+            with nvtx_range_debug("TorchDist.pp_all_gather_object",
+                                  color="green",
+                                  domain="torch.dist"):
+                dist.all_gather_object(output_list,
+                                       obj,
+                                       group=self.mapping.pp_group_pg)
             return output_list
 
     @log_op
@@ -734,10 +846,13 @@ class TorchDist(Distributed):
                 ]
             else:
                 output_list = None
-            dist.gather(obj,
-                        output_list,
-                        dst=dst,
-                        group=self.mapping.pp_group_pg)
+            with nvtx_range_debug("TorchDist.pp_gather",
+                                  color="green",
+                                  domain="torch.dist"):
+                dist.gather(obj,
+                            output_list,
+                            dst=dst,
+                            group=self.mapping.pp_group_pg)
             return output_list
         else:
             output_list = [None] * self.mapping.pp_group_pg.size()
@@ -745,24 +860,33 @@ class TorchDist(Distributed):
                 output_list = [None] * self.mapping.pp_group_pg.size()
             else:
                 output_list = None
-            dist.gather_object(obj,
-                               output_list,
-                               dst=dst,
-                               group=self.mapping.pp_group_pg)
+            with nvtx_range_debug("TorchDist.pp_gather_object",
+                                  color="green",
+                                  domain="torch.dist"):
+                dist.gather_object(obj,
+                                   output_list,
+                                   dst=dst,
+                                   group=self.mapping.pp_group_pg)
             return output_list
 
     @log_op
     def pp_broadcast(self, obj, root=0):
         if isinstance(obj, torch.Tensor):
-            dist.broadcast(obj, src=root, group=self.mapping.pp_group_pg)
+            with nvtx_range_debug("TorchDist.pp_broadcast",
+                                  color="blue",
+                                  domain="torch.dist"):
+                dist.broadcast(obj, src=root, group=self.mapping.pp_group_pg)
             return obj
         else:
             ret = [obj]
-            torch.distributed.broadcast_object_list(
-                ret,
-                src=root,
-                group=self.mapping.pp_group_pg,
-                device=torch.device("cpu"))
+            with nvtx_range_debug("TorchDist.pp_broadcast_object_list",
+                                  color="blue",
+                                  domain="torch.dist"):
+                torch.distributed.broadcast_object_list(
+                    ret,
+                    src=root,
+                    group=self.mapping.pp_group_pg,
+                    device=torch.device("cpu"))
             return ret[0]
 
 
@@ -826,10 +950,16 @@ def init_pp_comm(mapping):
 @TorchDist.log_op
 def pp_recv(tensor):
     """Receive tensors from previous pp rank."""
-    _pp_comm.recv(tensor)
+    with nvtx_range_debug("TorchDist.pp_recv",
+                          color="orange",
+                          domain="torch.dist"):
+        _pp_comm.recv(tensor)
 
 
 @TorchDist.log_op
 def pp_send(tensor):
     """Send tensors to next pp rank."""
-    _pp_comm.send(tensor)
+    with nvtx_range_debug("TorchDist.pp_send",
+                          color="orange",
+                          domain="torch.dist"):
+        _pp_comm.send(tensor)

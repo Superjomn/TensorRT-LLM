@@ -21,7 +21,7 @@ from tensorrt_llm.inputs.registry import DefaultInputProcessor
 from tensorrt_llm.llmapi import tracing
 from tensorrt_llm.metrics.enums import MetricNames
 
-from .._utils import nvtx_range_debug
+from .._utils import _gc_nvtx_watcher, nvtx_range_debug
 from ..bindings import executor as tllm
 from ..bindings import steady_clock_now
 from ..builder import EngineConfig
@@ -183,6 +183,9 @@ class BaseLLM:
 
         finally:
             logger.set_level(log_level)  # restore the log level
+
+        # GC NVTX profiling
+        self._gc_nvtx_handle = _gc_nvtx_watcher()
 
         logger_debug(f"LLM.args.mpi_session: {self.args.mpi_session}\n",
                      "yellow")

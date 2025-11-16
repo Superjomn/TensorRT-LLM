@@ -576,27 +576,38 @@ def default_gpus_per_node():
 
 def mpi_barrier():
     if ENABLE_MULTI_DEVICE:
-        mpi_comm().Barrier()
+        with nvtx_range_debug("mpi_barrier", color="purple", domain="mpi4py"):
+            mpi_comm().Barrier()
 
 
 def local_mpi_barrier():
     if ENABLE_MULTI_DEVICE:
-        local_comm.Barrier()
+        with nvtx_range_debug("local_mpi_barrier",
+                              color="purple",
+                              domain="mpi4py"):
+            local_comm.Barrier()
 
 
 def mpi_broadcast(obj, root=0):
-    return mpi_comm().bcast(obj, root) if global_mpi_size() > 1 else obj
+    if global_mpi_size() > 1:
+        with nvtx_range_debug("mpi_broadcast", color="purple", domain="mpi4py"):
+            return mpi_comm().bcast(obj, root)
+    return obj
 
 
 def mpi_allgather(obj):
-    return mpi_comm().allgather(obj) if ENABLE_MULTI_DEVICE else obj
+    if ENABLE_MULTI_DEVICE:
+        with nvtx_range_debug("mpi_allgather", color="purple", domain="mpi4py"):
+            return mpi_comm().allgather(obj)
+    return obj
 
 
 def mpi_isend(buf, dest, tag=0):
     # isend in buf-like objects (e.g. numpy array)
     # return request handle if ENABLE_MULTI_DEVICE
     if ENABLE_MULTI_DEVICE:
-        return mpi_comm().Isend(buf, dest, tag=tag)
+        with nvtx_range_debug("mpi_isend", color="purple", domain="mpi4py"):
+            return mpi_comm().Isend(buf, dest, tag=tag)
     return None
 
 
@@ -604,31 +615,42 @@ def mpi_send(buf, dest, tag=0):
     # send in buf-like objects (e.g. numpy array)
     # return request handle if ENABLE_MULTI_DEVICE
     if ENABLE_MULTI_DEVICE:
-        mpi_comm().Send(buf, dest, tag=tag)
+        with nvtx_range_debug("mpi_send", color="purple", domain="mpi4py"):
+            mpi_comm().Send(buf, dest, tag=tag)
     return None
 
 
 def mpi_recv(buf, source, tag):
     # recv in buf-like object (e.g. numpy array)
     if ENABLE_MULTI_DEVICE:
-        return mpi_comm().Recv(buf, source, tag=tag)
+        with nvtx_range_debug("mpi_recv", color="purple", domain="mpi4py"):
+            return mpi_comm().Recv(buf, source, tag=tag)
     return None
 
 
 def mpi_send_object(obj, dest, tag=0):
     if ENABLE_MULTI_DEVICE:
-        mpi_comm().send(obj, dest=dest, tag=tag)
+        with nvtx_range_debug("mpi_send_object",
+                              color="purple",
+                              domain="mpi4py"):
+            mpi_comm().send(obj, dest=dest, tag=tag)
 
 
 def mpi_isend_object(obj, dest, tag=0):
     if ENABLE_MULTI_DEVICE:
-        return mpi_comm().isend(obj, dest=dest, tag=tag)
+        with nvtx_range_debug("mpi_isend_object",
+                              color="purple",
+                              domain="mpi4py"):
+            return mpi_comm().isend(obj, dest=dest, tag=tag)
     return None
 
 
 def mpi_recv_object(source, tag):
     if ENABLE_MULTI_DEVICE:
-        return mpi_comm().recv(source=source, tag=tag)
+        with nvtx_range_debug("mpi_recv_object",
+                              color="purple",
+                              domain="mpi4py"):
+            return mpi_comm().recv(source=source, tag=tag)
     return None
 
 
@@ -1227,34 +1249,12 @@ PROFILE_RECORD_GC_ENV_VAR_NAME = "TLLM_PROFILE_RECORD_GC"
 
 
 class _GCNvtxHandle:
-    """Handle object for GC NVTX watcher to keep it alive."""
+    pass
 
 
-# Singleton for the GC NVTX watcher handle.
-_gc_watcher_handle: Optional[_GCNvtxHandle] = None
-
-
-def _setup_gc_nvtx_profiling() -> Optional[_GCNvtxHandle]:
-    """
-    Set up NVTX range markers for Python garbage collection events (singleton).
-    This helps in profiling to visualize when GC occurs during execution.
-
-    This function is called automatically at module import time. The environment
-    variable TLLM_PROFILE_RECORD_GC must be set before importing this module.
-
-    This is an internal function and should not be called directly by users.
-
-    Returns:
-        _GCNvtxHandle or None: A handle object that keeps the GC callback alive,
-                               or None if GC profiling is not enabled.
-    """
-    global _gc_watcher_handle
-
-    # Return existing handle if already initialized
-    if _gc_watcher_handle is not None:
-        return _gc_watcher_handle
-
-    enabled = os.environ.get(PROFILE_RECORD_GC_ENV_VAR_NAME, None)
+def _gc_nvtx_watcher():
+    #enabled = os.environ.get(PROFILE_RECORD_GC_ENV_VAR_NAME, None)
+    enabled = True
     if not enabled:
         return None
 
@@ -1280,10 +1280,4 @@ def _setup_gc_nvtx_profiling() -> Optional[_GCNvtxHandle]:
 
     handle = _GCNvtxHandle()
     weakref.finalize(handle, gc_cleanup, gc_callback)
-
-    _gc_watcher_handle = handle
     return handle
-
-
-# Initialize GC NVTX profiling singleton at module import time
-_setup_gc_nvtx_profiling()

@@ -286,6 +286,7 @@ async def async_benchmark(
                 statistics.register_request_perf_item(item)
                 pbar.update(1)
                 finished_requests += 1
+
             except asyncio.TimeoutError:
                 logger.debug("No items in queue. Continuing.")
 
