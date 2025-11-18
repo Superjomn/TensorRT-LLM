@@ -128,6 +128,23 @@ class RayExecutor(RpcExecutorMixin, GenerationExecutor):
             "MASTER_PORT": str(self.master_port)
         })
 
+        # Enable Nsight System profiling if requested via environment variable
+        enable_nsight = os.getenv("TRTLLM_RAY_ENABLE_NSIGHT",
+                                  "0").lower() in ("1", "true")
+        print(f"ray enable_nsight: {enable_nsight=}")
+        if enable_nsight:
+            runtime_env["nsight"] = {
+                "t": "cuda,nvtx,python-gil",
+                "cuda-graph-trace": "node",
+                "stop-on-exit": "true",
+                #"c": "cudaProfilerApi",
+                #"output": "/tmp/ray-300/",
+            }
+            logger.info(
+                "Nsight System profiling enabled for Ray GPU workers. "
+                "Profiling results will be saved to /tmp/ray/session_*/logs/nsight/"
+            )
+
         self.placement_group, self.bundle_indices = self._get_placement_group(
             tp_size=self.tp_size)
 

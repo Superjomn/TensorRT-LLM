@@ -472,6 +472,11 @@ def throughput_command(
             options.request_json,
             partial(report_utility.get_request_info, tokenizer))
         report_utility.report_statistics()
+
+        # This helps force dump the nsight report
+        print("Forcing profiler stop...")
+        import torch
+        torch.cuda.cudart().cudaProfilerStop()
     except KeyboardInterrupt:
         logger.info("Keyboard interrupt, exiting benchmark...")
     except Exception:
