@@ -2002,15 +2002,6 @@ class BaseLlmArgs(StrictBaseModel):
             raise ValueError(f"Invalid model: {v}")
         return v
 
-    @field_validator("otlp_traces_endpoint", mode='before')
-    @classmethod
-    def validate_otlp_traces_endpoint(cls, v, info):
-        if v is None:
-            env_value = os.getenv("TLLM_OTLP_ENDPOINT")
-            if env_value:
-                return env_value
-        return v
-
     @model_validator(mode="after")
     def validate_parallel_config(self):
         if self.moe_cluster_parallel_size is None:
@@ -2099,6 +2090,15 @@ class BaseLlmArgs(StrictBaseModel):
                 f"lora_prefetch_dir was set to '{self.peft_cache_config.lora_prefetch_dir}' "
                 "while LoRA prefetch is not supported")
         return self
+
+    def model_post_init(self, __context):
+        """Set otlp_traces_endpoint from environment variable if not explicitly provided."""
+        if self.otlp_traces_endpoint is None:
+            if env_value := os.getenv("TLLM_OTLP_ENDPOINT"):
+                logger.info(
+                    f"Using OTLP traces endpoint from environment variable: {env_value}"
+                )
+                self.otlp_traces_endpoint = env_value
 
     def get_runtime_sizes(self, ) -> Tuple[int, int, int, int]:
         return (

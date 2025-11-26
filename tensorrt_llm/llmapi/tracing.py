@@ -1,10 +1,10 @@
 # Copyright (c) 2025, NVIDIA CORPORATION.  All rights reserved.
 
 __all__ = [
-    'SpanAttributes', 'SpanKind', 'contains_trace_headers',
-    'extract_trace_context', 'get_span_exporter', 'global_otlp_tracer',
-    'init_tracer', 'insufficient_request_metrics_warning', 'is_otel_available',
-    'is_tracing_enabled', 'log_tracing_disabled_warning',
+    'SpanAttributes', 'SpanKind', 'Status', 'StatusCode',
+    'contains_trace_headers', 'extract_trace_context', 'get_span_exporter',
+    'global_otlp_tracer', 'init_tracer', 'insufficient_request_metrics_warning',
+    'is_otel_available', 'is_tracing_enabled', 'log_tracing_disabled_warning',
     'set_global_otlp_tracer', 'extract_trace_headers'
 ]
 
@@ -30,6 +30,7 @@ try:
     from opentelemetry.context.context import Context
     from opentelemetry.sdk.environment_variables import \
         OTEL_EXPORTER_OTLP_TRACES_PROTOCOL
+    from opentelemetry.sdk.resources import Resource
     from opentelemetry.sdk.trace import TracerProvider
     from opentelemetry.sdk.trace.export import BatchSpanProcessor
     from opentelemetry.trace import (SpanKind, Status, StatusCode, Tracer,
@@ -55,6 +56,24 @@ except ImportError:
     class Tracer:  # type: ignore
         pass
 
+    class Status:  # type: ignore
+
+        def __init__(self, status_code, description=""):
+            pass
+
+    class StatusCode:  # type: ignore
+        OK = "OK"
+        ERROR = "ERROR"
+
+    class Resource:  # type: ignore
+
+        def __init__(self, attributes=None):
+            self.attributes = attributes or {}
+
+        @classmethod
+        def create(cls, attributes=None):
+            return cls(attributes)
+
 
 def is_otel_available() -> bool:
     return _is_otel_imported
@@ -67,7 +86,20 @@ def init_tracer(instrumenting_module_name: str,
             "OpenTelemetry is not available. Unable to initialize "
             "a tracer. Ensure OpenTelemetry packages are installed. "
             f"Original error:\n{otel_import_error_traceback}")
-    trace_provider = TracerProvider()
+
+    # Set environment variable to ensure service name is picked up by all components
+    os.environ['OTEL_SERVICE_NAME'] = instrumenting_module_name
+
+    # Create resource with service name
+    # Use Resource.create to merge with default attributes but our service name should win
+    resource = Resource.create(
+        attributes={"service.name": instrumenting_module_name})
+
+    logger.info(
+        f"Initializing OTLP tracer with service name: {instrumenting_module_name}"
+    )
+
+    trace_provider = TracerProvider(resource=resource)
     span_exporter = get_span_exporter(otlp_traces_endpoint)
     trace_provider.add_span_processor(BatchSpanProcessor(span_exporter))
     set_tracer_provider(trace_provider)

@@ -184,6 +184,8 @@ class BaseLLM:
         finally:
             logger.set_level(log_level)  # restore the log level
 
+        self._init_otlp_tracer()
+
         logger_debug(f"LLM.args.mpi_session: {self.args.mpi_session}\n",
                      "yellow")
         self.mpi_session = self.args.mpi_session
@@ -226,12 +228,48 @@ class BaseLLM:
             self.runtime_context: Optional[_ModelRuntimeContext] = None
             self.llm_build_stats = LlmBuildStats()
 
-            self._build_model()
+            # Trace model building operation
+            if tracing.is_tracing_enabled():
+                with tracing.global_otlp_tracer().start_as_current_span(
+                        "LLM._build_model",
+                        kind=tracing.SpanKind.CLIENT) as span:
+                    try:
+                        span.set_attribute("model", str(model))
+                        span.set_attribute("tensor_parallel_size",
+                                           tensor_parallel_size)
+                        span.set_attribute("dtype", dtype)
+                        span.set_attribute("backend",
+                                           self.args.__class__.__name__)
+
+                        build_start_time = time.time()
+                        self._build_model()
+                        build_duration = time.time() - build_start_time
+
+                        span.set_attribute("build_duration_seconds",
+                                           build_duration)
+                        span.set_status(tracing.Status(tracing.StatusCode.OK))
+                    except Exception as e:
+                        span.record_exception(e)
+                        span.set_status(
+                            tracing.Status(tracing.StatusCode.ERROR,
+                                           f"Model build failed: {e}"))
+                        raise
+            else:
+                self._build_model()
 
         except Exception:
             if self.mpi_session is not None:
                 self.mpi_session.shutdown()
             raise
+
+        exception_handler.register(self, 'shutdown')
+        atexit.register(LLM._shutdown_wrapper, weakref.ref(self))
+
+    def _init_otlp_tracer(self) -> None:
+        """Initialize OpenTelemetry tracer if endpoint is configured."""
+        logger_debug(
+            f"Initializing OTLP tracer with endpoint: {self.args.otlp_traces_endpoint}",
+            "yellow")
 
         try:
             if self.args.otlp_traces_endpoint:
@@ -239,11 +277,15 @@ class BaseLLM:
                 logger.info(
                     f"Initialized OTLP tracer successfully, endpoint: {self.args.otlp_traces_endpoint}"
                 )
+                logger_debug(
+                    f"Initialized OTLP tracer successfully, endpoint: {self.args.otlp_traces_endpoint}",
+                    "green")
         except Exception as e:
             logger.error(f"Failed to initialize OTLP tracer: {e}")
 
-        exception_handler.register(self, 'shutdown')
-        atexit.register(LLM._shutdown_wrapper, weakref.ref(self))
+        tracing.add_event(
+            "LLM.init_otlp_tracer",
+            attributes={"endpoint": self.args.otlp_traces_endpoint})
 
     @property
     @set_api_status("beta")
