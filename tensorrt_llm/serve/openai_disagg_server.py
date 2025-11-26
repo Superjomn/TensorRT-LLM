@@ -63,7 +63,7 @@ class OpenAIDisaggServer:
 
         try:
             if self.otlp_cfg and self.otlp_cfg.otlp_traces_endpoint:
-                tracing.init_tracer("trt.llm", self.otlp_cfg.otlp_traces_endpoint)
+                tracing.init_tracer("trtllm", self.otlp_cfg.otlp_traces_endpoint)
                 logger.info(
                     f"Initialized OTLP tracer successfully, endpoint: {self.otlp_cfg.otlp_traces_endpoint}"
                 )

@@ -92,6 +92,9 @@ def get_span_exporter(endpoint):
 
 def extract_trace_context(
         headers: Optional[Mapping[str, str]]) -> Optional[Context]:
+    """
+    Extracts the trace context from the headers.
+    """
     if is_otel_available():
         headers = headers or {}
         return TraceContextTextMapPropagator().extract(headers)
@@ -194,6 +197,20 @@ def insufficient_request_metrics_warning() -> None:
 
 
 def trace_span(name: str = None):
+    """
+    Decorator to trace a function with an OpenTelemetry span.
+
+    Args:
+        name (str): The name of the span. Defaults to the function name.
+
+    Returns:
+        A decorator that wraps the function with an OpenTelemetry span.
+
+    Usage:
+        @trace_span()
+        async def my_function(*args, **kwargs):
+            pass
+    """
 
     def decorator(func):
 

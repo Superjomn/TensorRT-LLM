@@ -235,7 +235,7 @@ class BaseLLM:
 
         try:
             if self.args.otlp_traces_endpoint:
-                tracing.init_tracer("trt.llm", self.args.otlp_traces_endpoint)
+                tracing.init_tracer("trtllm", self.args.otlp_traces_endpoint)
                 logger.info(
                     f"Initialized OTLP tracer successfully, endpoint: {self.args.otlp_traces_endpoint}"
                 )

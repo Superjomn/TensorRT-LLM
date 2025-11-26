@@ -2002,6 +2002,15 @@ class BaseLlmArgs(StrictBaseModel):
             raise ValueError(f"Invalid model: {v}")
         return v
 
+    @field_validator("otlp_traces_endpoint", mode='before')
+    @classmethod
+    def validate_otlp_traces_endpoint(cls, v, info):
+        if v is None:
+            env_value = os.getenv("TLLM_OTLP_ENDPOINT")
+            if env_value:
+                return env_value
+        return v
+
     @model_validator(mode="after")
     def validate_parallel_config(self):
         if self.moe_cluster_parallel_size is None:
