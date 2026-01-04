@@ -642,6 +642,8 @@ def getAutoTriggerTagList(pipeline, testFilter, globalVars) {
         "triton_backend/": ["-Triton-"],
         "cpp/kernels/fmha_v2/": ["-FMHA-"],
         "tensorrt_llm/_torch/models/modeling_gpt_oss.py": ["-GptOss-"],
+        "tensorrt_llm/executor/rpc": ["-RPC-"],
+        "tests/unittest/executor/test_rpc": ["-RPC-"],
     ]
     for (file in changedFileList) {
         for (String key : specialFileToTagMap.keySet()) {

@@ -303,3 +303,21 @@ l0_dgx_h100:
   tests:
     - unittest/_torch/ray_orchestrator/multi_gpu -m "gpu4"
     - unittest/llmapi/test_async_llm.py -m "gpu4"
+- condition:
+    ranges:
+      system_gpu_count:
+        gte: 2
+        lte: 8
+    wildcards:
+      gpu:
+      - '*h100*'
+      linux_distribution_name: ubuntu*
+    terms:
+      stage: pre_merge
+      backend: pytorch
+      auto_trigger: rpc
+      orchestrator: mpi
+  tests:
+    - unittest/executor/test_rpc.py
+    - unittest/executor/test_rpc_worker.py
+    - unittest/executor/test_rpc_proxy.py

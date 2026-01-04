@@ -1958,6 +1958,8 @@ def getMakoArgsFromStageName(stageName, parseSysinfo=false) {
         makoArgs += ["auto_trigger=deepseek"]
     } else if (stageName.contains("-GptOss-")) {
         makoArgs += ["auto_trigger=gpt_oss"]
+    } else if (stageName.contains("-RPC-")) {
+        makoArgs += ["auto_trigger=rpc"]
     } else {
         makoArgs += ["auto_trigger=others"]
     }
@@ -3054,6 +3056,7 @@ def launchTestJobs(pipeline, testFilter)
         "DGX_H100-4_GPUs-PyTorch-DeepSeek-1": ["dgx-h100-x4-oci", "l0_dgx_h100", 1, 1, 4],
         "DGX_H100-4_GPUs-PyTorch-GptOss-1": ["dgx-h100-x4-oci", "l0_dgx_h100", 1, 1, 4],
         "DGX_H100-4_GPUs-PyTorch-Others-1": ["dgx-h100-x4-oci", "l0_dgx_h100", 1, 1, 4],
+        "DGX_H100-4_GPUs-PyTorch-RPC-1": ["dgx-h100-x4-oci", "l0_dgx_h100", 1, 1, 4],
         "B300-PyTorch-1": ["b300-single", "l0_b300", 1, 1],
         "DGX_B200-4_GPUs-PyTorch-1": ["b200-x4", "l0_dgx_b200", 1, 1, 4],
         "DGX_B200-4_GPUs-PyTorch-Ray-1": ["b200-x4-lbd", "l0_dgx_b200", 1, 1, 4, 1, true],
