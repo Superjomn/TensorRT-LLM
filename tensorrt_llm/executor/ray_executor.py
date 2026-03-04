@@ -120,12 +120,46 @@ class RayExecutor(RpcExecutorMixin, GenerationExecutor):
 
         logger.debug(f"{num_gpus=} for each worker.")
 
+        # --- [RAY_EXECUTOR_DEBUG] Log cluster state before worker creation ---
+        try:
+            nodes = ray.nodes()
+            logger.info(
+                f"[RAY_EXECUTOR_DEBUG] Cluster nodes: {len(nodes)}, "
+                f"master_address={self.master_address}, world_size={self.world_size}, tp_size={self.tp_size}"
+            )
+            for i, node in enumerate(nodes):
+                logger.info(
+                    f"[RAY_EXECUTOR_DEBUG] Node[{i}]: ip={node.get('NodeManagerAddress', 'N/A')}, "
+                    f"alive={node.get('Alive', 'N/A')}, "
+                    f"resources={node.get('Resources', {})}"
+                )
+            avail = ray.available_resources()
+            logger.info(f"[RAY_EXECUTOR_DEBUG] Available resources: {avail}")
+        except Exception as e:
+            logger.warning(f"[RAY_EXECUTOR_DEBUG] Failed to query cluster state: {e}")
+
         runtime_env = ray.runtime_env.RuntimeEnv()
         runtime_env["env_vars"] = os.environ.copy()
         runtime_env["env_vars"].update({
             "TLLM_DISABLE_MPI": "1",
             "MASTER_ADDR": self.master_address,  # head-IP for NCCL/Gloo
         })
+
+        # --- [RAY_EXECUTOR_DEBUG] Log critical env vars being propagated ---
+        _env = runtime_env["env_vars"]
+        _debug_keys = [
+            "CUDA_VISIBLE_DEVICES", "MASTER_ADDR", "MASTER_PORT", "RANK",
+            "WORLD_SIZE", "RAY_ADDRESS", "RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES",
+            "TLLM_DISABLE_MPI", "NCCL_DEBUG", "LD_LIBRARY_PATH",
+            "RAY_LOCAL_WORLD_SIZE", "TRTLLM_RAY_PER_WORKER_GPUS",
+        ]
+        logger.info(
+            f"[RAY_EXECUTOR_DEBUG] runtime_env total env_vars count: {len(_env)}"
+        )
+        for k in _debug_keys:
+            if k in _env:
+                val = _env[k] if k != "LD_LIBRARY_PATH" else f"(len={len(_env[k])})"
+                logger.info(f"[RAY_EXECUTOR_DEBUG] runtime_env[{k}]={val}")
 
         placement_groups, self.bundle_indices = self._get_placement_group(
             tp_size=self.tp_size, worker_kwargs=worker_kwargs)
@@ -135,10 +169,40 @@ class RayExecutor(RpcExecutorMixin, GenerationExecutor):
         else:
             self.placement_group = placement_groups
 
+        # --- [RAY_EXECUTOR_DEBUG] Log placement group details ---
+        logger.info(
+            f"[RAY_EXECUTOR_DEBUG] placement_groups type={type(placement_groups).__name__}, "
+            f"bundle_indices={self.bundle_indices}, num_gpus_per_worker={num_gpus}"
+        )
+        try:
+            if isinstance(placement_groups, list):
+                seen_pg_ids = set()
+                for idx, pg in enumerate(placement_groups):
+                    pg_id = id(pg)
+                    if pg_id not in seen_pg_ids:
+                        seen_pg_ids.add(pg_id)
+                        from ray.util import placement_group_table
+                        pg_info = placement_group_table(pg)
+                        logger.info(
+                            f"[RAY_EXECUTOR_DEBUG] PG(id={pg_id}): state={pg_info.get('state', 'N/A')}, "
+                            f"bundles={pg_info.get('bundles', 'N/A')}, "
+                            f"bundles_to_node_id={pg_info.get('bundles_to_node_id', 'N/A')}"
+                        )
+            else:
+                from ray.util import placement_group_table
+                pg_info = placement_group_table(placement_groups)
+                logger.info(f"[RAY_EXECUTOR_DEBUG] PG info: {pg_info}")
+        except Exception as e:
+            logger.warning(f"[RAY_EXECUTOR_DEBUG] Failed to inspect PG: {e}")
+
         self.workers = []
         for rank in range(self.world_size):
             pg = placement_groups[rank] if isinstance(
                 placement_groups, list) else placement_groups
+            logger.info(
+                f"[RAY_EXECUTOR_DEBUG] Creating worker rank={rank}, "
+                f"pg_id={id(pg)}, bundle_index={self.bundle_indices[rank]}, num_gpus={num_gpus}"
+            )
             worker = RayWorkerWrapper.options(
                 num_gpus=num_gpus,
                 runtime_env=runtime_env,
@@ -147,34 +211,96 @@ class RayExecutor(RpcExecutorMixin, GenerationExecutor):
                     placement_group_bundle_index=self.bundle_indices[rank],
                 )).remote(worker_cls, worker_kwargs, self.world_size, rank)
             self.workers.append(worker)
+        logger.info(f"[RAY_EXECUTOR_DEBUG] All {self.world_size} worker actors created (not yet ready)")
 
     def init_workers_sync(self):
         self.create_workers(RayGPUWorker, self.worker_kwargs)
+        logger.info(f"[RAY_EXECUTOR_DEBUG] init_workers_sync: waiting for {len(self.workers)} workers...")
         try:
             ray.get(self._get_worker_ready_futures())
         except ray.exceptions.ActorDiedError as e:
+            logger.error(f"[RAY_EXECUTOR_DEBUG] ActorDiedError in init_workers_sync: {e}")
+            # Check each worker's state
+            for i, w in enumerate(self.workers):
+                try:
+                    ray.get(w.__ray_ready__.remote(), timeout=2.0)
+                    logger.info(f"[RAY_EXECUTOR_DEBUG] Worker rank={i} is alive")
+                except Exception as we:
+                    logger.error(f"[RAY_EXECUTOR_DEBUG] Worker rank={i} DEAD/UNREACHABLE: {type(we).__name__}: {we}")
             raise RuntimeError("RayGPUWorker died during initialization") from e
+        logger.info(f"[RAY_EXECUTOR_DEBUG] All workers ready (sync). Setting up TCP store...")
         port = self.call_all_ray_workers("setup_tcp_store",
                                          leader_only=True,
                                          async_call=False)[0]
+        logger.info(f"[RAY_EXECUTOR_DEBUG] TCP store port={port}. Setting up distributed env...")
         self.call_all_ray_workers("setup_distributed_env_and_worker",
                                   leader_only=False,
                                   async_call=False,
                                   port=port)
+        logger.info(f"[RAY_EXECUTOR_DEBUG] init_workers_sync complete.")
 
     async def init_workers_async(self):
         self.create_workers(RayGPUWorker, self.worker_kwargs)
+        logger.info(f"[RAY_EXECUTOR_DEBUG] init_workers_async: waiting for {len(self.workers)} workers to be ready...")
         try:
-            await asyncio.gather(*self._get_worker_ready_futures())
+            ready_futures = self._get_worker_ready_futures()
+            # Use ray.wait to identify which worker(s) fail first
+            remaining = list(ready_futures)
+            ready_count = 0
+            while remaining:
+                ready, remaining = ray.wait(remaining, num_returns=1, timeout=60.0)
+                if not ready:
+                    logger.warning(
+                        f"[RAY_EXECUTOR_DEBUG] Timeout waiting for workers. "
+                        f"{ready_count}/{len(self.workers)} ready, {len(remaining)} remaining"
+                    )
+                    # Check each remaining worker's state
+                    for i, w in enumerate(self.workers):
+                        try:
+                            state = ray.get_actor(w._actor_id.hex()) if hasattr(w, '_actor_id') else "unknown"
+                        except Exception:
+                            state = "lookup_failed"
+                        logger.info(f"[RAY_EXECUTOR_DEBUG] Worker {i} state: {state}")
+                    continue
+                try:
+                    await asyncio.gather(*ready)
+                    ready_count += 1
+                    logger.info(f"[RAY_EXECUTOR_DEBUG] Worker ready ({ready_count}/{len(self.workers)})")
+                except ray.exceptions.ActorDiedError as e:
+                    logger.error(
+                        f"[RAY_EXECUTOR_DEBUG] Worker died during init! "
+                        f"ready_count={ready_count}/{len(self.workers)}, "
+                        f"error_type={type(e).__name__}, error={e}"
+                    )
+                    # Try to get more details about each worker
+                    for i, w in enumerate(self.workers):
+                        try:
+                            # Check if this worker is alive
+                            ray.get(w.__ray_ready__.remote(), timeout=2.0)
+                            logger.info(f"[RAY_EXECUTOR_DEBUG] Worker rank={i} is alive")
+                        except ray.exceptions.ActorDiedError as we:
+                            logger.error(
+                                f"[RAY_EXECUTOR_DEBUG] Worker rank={i} DEAD: {we}"
+                            )
+                        except ray.exceptions.GetTimeoutError:
+                            logger.warning(f"[RAY_EXECUTOR_DEBUG] Worker rank={i} timeout (may be pending)")
+                        except Exception as we:
+                            logger.warning(f"[RAY_EXECUTOR_DEBUG] Worker rank={i} check error: {type(we).__name__}: {we}")
+                    raise RuntimeError("RayGPUWorker died during initialization") from e
         except ray.exceptions.ActorDiedError as e:
+            logger.error(f"[RAY_EXECUTOR_DEBUG] ActorDiedError in init_workers_async: {e}")
             raise RuntimeError("RayGPUWorker died during initialization") from e
+
+        logger.info(f"[RAY_EXECUTOR_DEBUG] All workers ready. Setting up TCP store...")
         port = (await asyncio.gather(*self.call_all_ray_workers(
             "setup_tcp_store", leader_only=True, async_call=True)))[0]
+        logger.info(f"[RAY_EXECUTOR_DEBUG] TCP store on port={port}. Setting up distributed env...")
         await asyncio.gather(
             *self.call_all_ray_workers("setup_distributed_env_and_worker",
                                        leader_only=False,
                                        async_call=True,
                                        port=port))
+        logger.info(f"[RAY_EXECUTOR_DEBUG] init_workers_async complete.")
 
     @unwrap_ray_errors()
     def call_all_ray_workers(self, func: str, leader_only: bool,
@@ -378,6 +504,23 @@ class RayExecutor(RpcExecutorMixin, GenerationExecutor):
                 f"Creating {self.world_size} workers with external placement groups"
             )
 
+            # --- [RAY_EXECUTOR_DEBUG] Log external PG details ---
+            try:
+                from ray.util import placement_group_table
+                for i, (pg, indices) in enumerate(zip(
+                        placement_config.placement_groups,
+                        placement_config.placement_bundle_indices)):
+                    pg_info = placement_group_table(pg)
+                    logger.info(
+                        f"[RAY_EXECUTOR_DEBUG] External PG[{i}]: state={pg_info.get('state', 'N/A')}, "
+                        f"bundle_count={len(pg_info.get('bundles', []))}, "
+                        f"bundles={pg_info.get('bundles', 'N/A')}, "
+                        f"bundles_to_node_id={pg_info.get('bundles_to_node_id', 'N/A')}, "
+                        f"assigned_indices={indices}"
+                    )
+            except Exception as e:
+                logger.warning(f"[RAY_EXECUTOR_DEBUG] Failed to inspect external PGs: {e}")
+
             flat_pgs = []
             flat_indices = []
             for pg, indices in zip(placement_config.placement_groups,
@@ -385,6 +528,11 @@ class RayExecutor(RpcExecutorMixin, GenerationExecutor):
                 for idx in indices:
                     flat_pgs.append(pg)
                     flat_indices.append(idx)
+
+            logger.info(
+                f"[RAY_EXECUTOR_DEBUG] External PGs flattened: "
+                f"{len(flat_pgs)} entries, flat_indices={flat_indices}"
+            )
 
             return flat_pgs, flat_indices
 

@@ -43,6 +43,17 @@ def resolve_obj_by_qualname(qualname: str) -> Any:
 class RayWorkerWrapper:
 
     def __init__(self, worker_cls, worker_kwargs, world_size, rank):
+        # --- [RAY_EXECUTOR_DEBUG] Very early print before any heavy imports ---
+        import sys
+        print(
+            f"[RAY_EXECUTOR_DEBUG] RayWorkerWrapper.__init__ START: rank={rank}, "
+            f"world_size={world_size}, pid={os.getpid()}, "
+            f"MASTER_ADDR={os.environ.get('MASTER_ADDR', 'NOT_SET')}, "
+            f"CUDA_VISIBLE_DEVICES={os.environ.get('CUDA_VISIBLE_DEVICES', 'NOT_SET')}, "
+            f"RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES={os.environ.get('RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES', 'NOT_SET')}",
+            file=sys.stderr, flush=True,
+        )
+
         self.master_address = os.environ["MASTER_ADDR"]
         self.world_size = world_size
         self.rank = rank
@@ -56,8 +67,20 @@ class RayWorkerWrapper:
             f"CUDA device count visible to Ray: {torch.cuda.device_count()}")
 
         # Physical gpu id
-        self.gpu = int(ray.get_gpu_ids()[0])
+        ray_gpu_ids = ray.get_gpu_ids()
+        logger.info(
+            f"[RAY_EXECUTOR_DEBUG] rank={rank}, ray.get_gpu_ids()={ray_gpu_ids}, "
+            f"torch.cuda.device_count()={torch.cuda.device_count()}, "
+            f"CUDA_VISIBLE_DEVICES={os.environ.get('CUDA_VISIBLE_DEVICES', 'NOT_SET')}"
+        )
+
+        self.gpu = int(ray_gpu_ids[0])
         self.local_gpu = self.physical_to_local_id(self.gpu)
+
+        logger.info(
+            f"[RAY_EXECUTOR_DEBUG] rank={rank}, physical_gpu={self.gpu}, "
+            f"local_gpu={self.local_gpu}"
+        )
 
         torch.cuda.set_device(self.local_gpu)
 
