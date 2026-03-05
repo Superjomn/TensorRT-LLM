@@ -801,26 +801,19 @@ class AllReduce(nn.Module):
                       f"{_name}.dtype={getattr(_val, 'dtype', 'NO_DTYPE')}",
                       file=sys.stderr, flush=True)
 
-        # WAR: allreduce_pg C++ op does not handle None for optional tensors
-        if self._disable_mpi:
-            _empty = torch.empty(0, device=input.device, dtype=input.dtype)
-            _residual = all_reduce_params.residual if all_reduce_params.residual is not None else _empty
-            _norm_weight = all_reduce_params.norm_weight if all_reduce_params.norm_weight is not None else _empty
-            _scale = all_reduce_params.scale if all_reduce_params.scale is not None else _empty
-            _bias = all_reduce_params.bias if all_reduce_params.bias is not None else _empty
-        else:
-            _residual = all_reduce_params.residual
-            _norm_weight = all_reduce_params.norm_weight
-            _scale = all_reduce_params.scale
-            _bias = all_reduce_params.bias
+        # WAR: allreduce_pg with AUTO strategy crashes with "tensor does not have a device"
+        # Force NCCL strategy when MPI is disabled (Ray mode) to bypass custom allreduce path
+        if self._disable_mpi and allreduce_strategy == AllReduceStrategy.AUTO:
+            print(f"[RAY_EXECUTOR_DEBUG] AllReduceOp.forward WAR: forcing NCCL strategy (was AUTO) pid={os.getpid()}", file=sys.stderr, flush=True)
+            allreduce_strategy = AllReduceStrategy.NCCL
 
         try:
             output = self.all_reduce_op(
                 input=input,
-                residual=_residual,
-                norm_weight=_norm_weight,
-                scale=_scale,
-                bias=_bias,
+                residual=all_reduce_params.residual,
+                norm_weight=all_reduce_params.norm_weight,
+                scale=all_reduce_params.scale,
+                bias=all_reduce_params.bias,
                 workspace=self.workspace,
                 group=self.mapping.tp_group,
                 strategy=allreduce_strategy,
