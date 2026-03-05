@@ -372,8 +372,29 @@ class Qwen3MoEModel(DecoderModel):
                 "You cannot specify both input_ids and inputs_embeds at the same time, and must specify either one"
             )
 
+        import sys
+        _dbg_pid = os.getpid()
+        if input_ids is not None:
+            print(f"[RAY_EXECUTOR_DEBUG] Qwen3MoEModel.forward ENTRY pid={_dbg_pid} "
+                  f"input_ids.device={getattr(input_ids, 'device', 'NO_DEVICE')} "
+                  f"input_ids.shape={getattr(input_ids, 'shape', 'NO_SHAPE')} "
+                  f"input_ids.dtype={getattr(input_ids, 'dtype', 'NO_DTYPE')} "
+                  f"input_ids.is_cuda={getattr(input_ids, 'is_cuda', 'N/A')}",
+                  file=sys.stderr, flush=True)
+        else:
+            print(f"[RAY_EXECUTOR_DEBUG] Qwen3MoEModel.forward ENTRY pid={_dbg_pid} "
+                  f"input_ids=None inputs_embeds.device={getattr(inputs_embeds, 'device', 'NO_DEVICE')}",
+                  file=sys.stderr, flush=True)
+
         if inputs_embeds is None:
             inputs_embeds = self.embed_tokens(input_ids)
+
+        print(f"[RAY_EXECUTOR_DEBUG] Qwen3MoEModel.forward POST_EMBED pid={_dbg_pid} "
+              f"inputs_embeds.device={getattr(inputs_embeds, 'device', 'NO_DEVICE')} "
+              f"inputs_embeds.shape={getattr(inputs_embeds, 'shape', 'NO_SHAPE')} "
+              f"inputs_embeds.dtype={getattr(inputs_embeds, 'dtype', 'NO_DTYPE')} "
+              f"inputs_embeds.is_cuda={getattr(inputs_embeds, 'is_cuda', 'N/A')}",
+              file=sys.stderr, flush=True)
 
         hidden_states = inputs_embeds
 

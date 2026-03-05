@@ -248,6 +248,17 @@ class Embedding(LMHead):
             self.vocab_end_index = num_embeddings
 
     def forward(self, input):
+        import sys
+        _dbg_pid = __import__('os').getpid()
+        print(f"[RAY_EXECUTOR_DEBUG] Embedding.forward ENTRY pid={_dbg_pid} "
+              f"input.device={getattr(input, 'device', 'NO_DEVICE')} "
+              f"input.shape={getattr(input, 'shape', 'NO_SHAPE')} "
+              f"input.dtype={getattr(input, 'dtype', 'NO_DTYPE')} "
+              f"weight.device={getattr(self.weight, 'device', 'NO_DEVICE')} "
+              f"tp_size={self.tp_size} tp_rank={self.tp_rank} "
+              f"tp_mode={self.tp_mode}",
+              file=sys.stderr, flush=True)
+
         if self.tp_size > 1:
             # Run the ops before all_reduce/all_gather.
             # We use torch.compile() to fuse the tiny pointwise ops before all_reduce/all_gather for Embedding module.
@@ -264,10 +275,22 @@ class Embedding(LMHead):
                                     self.vocab_end_index, self.gather_output,
                                     self.padding_size)
 
+        print(f"[RAY_EXECUTOR_DEBUG] Embedding.forward POST_EMBED pid={_dbg_pid} "
+              f"output.device={getattr(output, 'device', 'NO_DEVICE')} "
+              f"output.shape={getattr(output, 'shape', 'NO_SHAPE')} "
+              f"output.dtype={getattr(output, 'dtype', 'NO_DTYPE')} "
+              f"output.is_cuda={getattr(output, 'is_cuda', 'N/A')}",
+              file=sys.stderr, flush=True)
+
         # Run the all_reduce/all_gather.
         if self.tp_size > 1:
             if self.tp_mode == TensorParallelMode.COLUMN:
                 # Reduce across all the model parallel GPUs.
+                print(f"[RAY_EXECUTOR_DEBUG] Embedding.forward PRE_ALLREDUCE pid={_dbg_pid} "
+                      f"tp_mode=COLUMN output.device={getattr(output, 'device', 'NO_DEVICE')} "
+                      f"output.is_cuda={getattr(output, 'is_cuda', 'N/A')} "
+                      f"output.data_ptr={output.data_ptr() if hasattr(output, 'data_ptr') else 'N/A'}",
+                      file=sys.stderr, flush=True)
                 output = self.all_reduce(output)
             elif self.tp_mode == TensorParallelMode.ROW:
                 if self.gather_output:

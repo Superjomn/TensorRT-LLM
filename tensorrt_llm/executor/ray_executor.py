@@ -1,5 +1,8 @@
 import asyncio
+import json
 import os
+import sys
+import time
 from typing import Any, Dict, List, Optional, Tuple
 
 try:
@@ -24,6 +27,13 @@ from .request import GenerationRequest
 from .result import GenerationResult
 from .rpc_proxy_mixin import RpcExecutorMixin
 from .utils import has_event_loop
+
+
+def _dbg(msg: str):
+    """Print debug message to stderr so it appears in ray-ray-job.err."""
+    import datetime
+    ts = datetime.datetime.now().strftime("%H:%M:%S.%f")[:-3]
+    print(f"[RAY_EXECUTOR_DEBUG {ts}] {msg}", file=sys.stderr, flush=True)
 
 __all__ = [
     "RayExecutor",
@@ -123,43 +133,113 @@ class RayExecutor(RpcExecutorMixin, GenerationExecutor):
         # --- [RAY_EXECUTOR_DEBUG] Log cluster state before worker creation ---
         try:
             nodes = ray.nodes()
-            logger.info(
-                f"[RAY_EXECUTOR_DEBUG] Cluster nodes: {len(nodes)}, "
+            _dbg(
+                f"Cluster nodes: {len(nodes)}, "
                 f"master_address={self.master_address}, world_size={self.world_size}, tp_size={self.tp_size}"
             )
             for i, node in enumerate(nodes):
-                logger.info(
-                    f"[RAY_EXECUTOR_DEBUG] Node[{i}]: ip={node.get('NodeManagerAddress', 'N/A')}, "
+                _dbg(
+                    f"Node[{i}]: ip={node.get('NodeManagerAddress', 'N/A')}, "
                     f"alive={node.get('Alive', 'N/A')}, "
                     f"resources={node.get('Resources', {})}"
                 )
             avail = ray.available_resources()
-            logger.info(f"[RAY_EXECUTOR_DEBUG] Available resources: {avail}")
+            cluster_res = ray.cluster_resources()
+            _dbg(f"Cluster resources (total): {cluster_res}")
+            _dbg(f"Available resources (free): {avail}")
+
+            # Per-node GPU breakdown: show total vs available GPUs on each node
+            _dbg("--- Per-node GPU breakdown ---")
+            for i, node in enumerate(nodes):
+                _node_ip = node.get('NodeManagerAddress', 'N/A')
+                _node_id = node.get('NodeID', 'N/A')
+                _total_res = node.get('Resources', {})
+                _total_gpu = _total_res.get('GPU', 0)
+                _total_cpu = _total_res.get('CPU', 0)
+                _total_mem = _total_res.get('memory', 0)
+                _total_obj = _total_res.get('object_store_memory', 0)
+                _dbg(
+                    f"Node[{i}] ip={_node_ip}, id={str(_node_id)[:16]}..., alive={node.get('Alive')}: "
+                    f"total_GPU={_total_gpu}, total_CPU={_total_cpu}, "
+                    f"memory={_total_mem/(1024**3):.1f}GB, obj_store={_total_obj/(1024**3):.1f}GB"
+                )
+            _dbg("--- End per-node GPU breakdown ---")
         except Exception as e:
-            logger.warning(f"[RAY_EXECUTOR_DEBUG] Failed to query cluster state: {e}")
+            _dbg(f"WARNING: Failed to query cluster state: {e}")
 
         runtime_env = ray.runtime_env.RuntimeEnv()
-        runtime_env["env_vars"] = os.environ.copy()
+
+        # --- [RAY_EXECUTOR_DEBUG] ITERATION 4 FIX: Filter out node-specific env vars ---
+        # TRT-LLM was copying ALL 212 env vars from os.environ into runtime_env,
+        # including node-specific Ray internals (RAY_RAYLET_PID, HOSTNAME, etc.)
+        # that are WRONG for the remote node. This causes remote workers to connect
+        # to the wrong raylet, resulting in immediate store.cc disconnection.
+        _BLOCKLIST_ENV_PREFIXES = (
+            "RAY_RAYLET_PID",
+            "RAY_ADDRESS",
+            "RAY_JOB_ID",
+            "RAY_NODE_TYPE_HEAD",
+            "HOSTNAME",
+            "SLURMD_NODENAME",
+            "SLURM_NODEID",
+            "SLURM_LOCALID",
+            "SLURM_GTIDS",
+            "SLURM_PROCID",
+            "SLURM_STEP_",
+            "SLURM_TASK_",
+            "SLURM_LAUNCH_NODE",
+            "OMPI_",   # OpenMPI vars are node-specific
+            "PMI_",    # PMI vars are node-specific
+        )
+
+        filtered_env = {}
+        blocked = []
+        for k, v in os.environ.items():
+            if any(k.startswith(prefix) or k == prefix for prefix in _BLOCKLIST_ENV_PREFIXES):
+                blocked.append(k)
+            else:
+                filtered_env[k] = v
+
+        _dbg(f"Filtered env vars: kept {len(filtered_env)}, blocked {len(blocked)}: {blocked}")
+        runtime_env["env_vars"] = filtered_env
+
         runtime_env["env_vars"].update({
             "TLLM_DISABLE_MPI": "1",
             "MASTER_ADDR": self.master_address,  # head-IP for NCCL/Gloo
         })
 
-        # --- [RAY_EXECUTOR_DEBUG] Log critical env vars being propagated ---
+        # --- [RAY_EXECUTOR_DEBUG] Hypothesis test: confirm node-specific vars are blocked ---
+        _dbg(f"RAY_RAYLET_PID in runtime_env: {'RAY_RAYLET_PID' in runtime_env.get('env_vars', {})}")
+        _dbg(f"RAY_ADDRESS in runtime_env: {'RAY_ADDRESS' in runtime_env.get('env_vars', {})}")
+        _dbg(f"HOSTNAME in runtime_env: {'HOSTNAME' in runtime_env.get('env_vars', {})}")
+        _dbg(f"SLURMD_NODENAME in runtime_env: {'SLURMD_NODENAME' in runtime_env.get('env_vars', {})}")
+
+        # --- [RAY_EXECUTOR_DEBUG] Log ALL env var keys being propagated ---
         _env = runtime_env["env_vars"]
+        _dbg(f"runtime_env total env_vars count: {len(_env)}")
+        _dbg(f"runtime_env env_var KEYS: {sorted(_env.keys())}")
+
         _debug_keys = [
             "CUDA_VISIBLE_DEVICES", "MASTER_ADDR", "MASTER_PORT", "RANK",
             "WORLD_SIZE", "RAY_ADDRESS", "RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES",
             "TLLM_DISABLE_MPI", "NCCL_DEBUG", "LD_LIBRARY_PATH",
             "RAY_LOCAL_WORLD_SIZE", "TRTLLM_RAY_PER_WORKER_GPUS",
         ]
-        logger.info(
-            f"[RAY_EXECUTOR_DEBUG] runtime_env total env_vars count: {len(_env)}"
-        )
         for k in _debug_keys:
             if k in _env:
                 val = _env[k] if k != "LD_LIBRARY_PATH" else f"(len={len(_env[k])})"
-                logger.info(f"[RAY_EXECUTOR_DEBUG] runtime_env[{k}]={val}")
+                _dbg(f"runtime_env[{k}]={val}")
+
+        # --- [RAY_EXECUTOR_DEBUG] Check runtime_env serialization size ---
+        try:
+            _env_json = json.dumps({"env_vars": _env})
+            _dbg(f"runtime_env serialized size: {len(_env_json)} bytes")
+            # Also check for any env var with very long value
+            _long_vars = [(k, len(v)) for k, v in _env.items() if len(v) > 500]
+            if _long_vars:
+                _dbg(f"Env vars with value > 500 chars: {_long_vars}")
+        except Exception as e:
+            _dbg(f"WARNING: Failed to serialize runtime_env: {e}")
 
         placement_groups, self.bundle_indices = self._get_placement_group(
             tp_size=self.tp_size, worker_kwargs=worker_kwargs)
@@ -170,8 +250,8 @@ class RayExecutor(RpcExecutorMixin, GenerationExecutor):
             self.placement_group = placement_groups
 
         # --- [RAY_EXECUTOR_DEBUG] Log placement group details ---
-        logger.info(
-            f"[RAY_EXECUTOR_DEBUG] placement_groups type={type(placement_groups).__name__}, "
+        _dbg(
+            f"placement_groups type={type(placement_groups).__name__}, "
             f"bundle_indices={self.bundle_indices}, num_gpus_per_worker={num_gpus}"
         )
         try:
@@ -183,26 +263,215 @@ class RayExecutor(RpcExecutorMixin, GenerationExecutor):
                         seen_pg_ids.add(pg_id)
                         from ray.util import placement_group_table
                         pg_info = placement_group_table(pg)
-                        logger.info(
-                            f"[RAY_EXECUTOR_DEBUG] PG(id={pg_id}): state={pg_info.get('state', 'N/A')}, "
+                        _dbg(
+                            f"PG(id={pg_id}): state={pg_info.get('state', 'N/A')}, "
                             f"bundles={pg_info.get('bundles', 'N/A')}, "
                             f"bundles_to_node_id={pg_info.get('bundles_to_node_id', 'N/A')}"
                         )
             else:
                 from ray.util import placement_group_table
                 pg_info = placement_group_table(placement_groups)
-                logger.info(f"[RAY_EXECUTOR_DEBUG] PG info: {pg_info}")
+                _dbg(f"PG info: {pg_info}")
         except Exception as e:
-            logger.warning(f"[RAY_EXECUTOR_DEBUG] Failed to inspect PG: {e}")
+            _dbg(f"WARNING: Failed to inspect PG: {e}")
+
+        # --- [RAY_EXECUTOR_DEBUG] Resolve node assignment per bundle ---
+        _bundle_to_node = {}
+        try:
+            if isinstance(placement_groups, list):
+                seen_pgs = {}
+                for rank_idx in range(self.world_size):
+                    pg = placement_groups[rank_idx]
+                    pg_key = id(pg)
+                    if pg_key not in seen_pgs:
+                        from ray.util import placement_group_table
+                        pg_info = placement_group_table(pg)
+                        seen_pgs[pg_key] = pg_info.get('bundles_to_node_id', {})
+                    b2n = seen_pgs[pg_key]
+                    bundle_idx = self.bundle_indices[rank_idx]
+                    # bundles_to_node_id may use string keys
+                    node_id = b2n.get(bundle_idx, b2n.get(str(bundle_idx), 'unknown'))
+                    _bundle_to_node[rank_idx] = node_id
+            else:
+                from ray.util import placement_group_table
+                pg_info = placement_group_table(placement_groups)
+                b2n = pg_info.get('bundles_to_node_id', {})
+                for rank_idx in range(self.world_size):
+                    bundle_idx = self.bundle_indices[rank_idx]
+                    node_id = b2n.get(bundle_idx, b2n.get(str(bundle_idx), 'unknown'))
+                    _bundle_to_node[rank_idx] = node_id
+            _dbg(f"Bundle-to-node mapping: { {r: n[:12]+'...' if len(str(n))>12 else n for r, n in _bundle_to_node.items()} }")
+            # Group by node
+            _node_ranks = {}
+            for r, n in _bundle_to_node.items():
+                _node_ranks.setdefault(n, []).append(r)
+            for n, ranks in _node_ranks.items():
+                _short = n[:16] + '...' if len(str(n)) > 16 else n
+                _dbg(f"Node {_short}: ranks={ranks} ({len(ranks)} workers)")
+        except Exception as e:
+            _dbg(f"WARNING: Failed to resolve bundle-to-node: {e}")
+
+        # Identify which node is "local" (same as TRTLLMHttpServer/master)
+        _local_node_id = None
+        try:
+            _my_node_ip = ray.util.get_node_ip_address()
+            for node in ray.nodes():
+                if node.get('NodeManagerAddress') == _my_node_ip and node.get('Alive'):
+                    _local_node_id = node.get('NodeID')
+                    break
+            _dbg(f"Local node (TRTLLMHttpServer): ip={_my_node_ip}, node_id={_local_node_id[:16] if _local_node_id else 'unknown'}...")
+        except Exception as e:
+            _dbg(f"WARNING: Failed to identify local node: {e}")
+
+        # --- [RAY_EXECUTOR_DEBUG] Check for PG overlap / GPU double-booking ---
+        try:
+            _dbg("--- Placement Group overlap check ---")
+            # Get the current placement group (from verl's outer context)
+            _outer_pg = get_current_placement_group()
+            if _outer_pg is not None:
+                from ray.util import placement_group_table
+                _outer_info = placement_group_table(_outer_pg)
+                _dbg(
+                    f"OUTER PG (from verl context): state={_outer_info.get('state', 'N/A')}, "
+                    f"bundles={_outer_info.get('bundles', 'N/A')}, "
+                    f"bundles_to_node_id={_outer_info.get('bundles_to_node_id', 'N/A')}"
+                )
+                # Check if outer PG nodes overlap with TRT-LLM PG nodes
+                _outer_nodes = set(_outer_info.get('bundles_to_node_id', {}).values())
+                _trtllm_nodes = set(_bundle_to_node.values())
+                _overlap = _outer_nodes & _trtllm_nodes
+                if _overlap:
+                    _dbg(f"WARNING: OUTER PG and TRT-LLM PG share nodes: {[n[:16]+'...' for n in _overlap]}")
+                    # Check GPU counts on overlapping nodes
+                    for _node_id in _overlap:
+                        _outer_gpus = sum(
+                            b.get('GPU', 0) for b_idx, b in enumerate(_outer_info.get('bundles', []))
+                            if _outer_info.get('bundles_to_node_id', {}).get(str(b_idx)) == _node_id
+                            or _outer_info.get('bundles_to_node_id', {}).get(b_idx) == _node_id
+                        )
+                        _trtllm_ranks_on_node = [r for r, n in _bundle_to_node.items() if n == _node_id]
+                        _dbg(
+                            f"Overlapping node {str(_node_id)[:16]}...: "
+                            f"outer_PG_GPUs={_outer_gpus}, "
+                            f"trtllm_ranks={_trtllm_ranks_on_node} (requesting {num_gpus} GPU each = {len(_trtllm_ranks_on_node)*num_gpus} total)"
+                        )
+                else:
+                    _dbg(f"No node overlap between OUTER PG and TRT-LLM PG")
+            else:
+                _dbg(f"No OUTER placement group in current context")
+
+            # Also check available resources RIGHT NOW on each node
+            _dbg("--- Available resources per node (post-PG) ---")
+            for node in ray.nodes():
+                if not node.get('Alive'):
+                    continue
+                _node_ip = node.get('NodeManagerAddress', 'N/A')
+                _node_id = node.get('NodeID', 'N/A')
+                # ray.available_resources() is cluster-wide; we need per-node
+                # Use node's Resources (total) for reference
+                _total_gpu = node.get('Resources', {}).get('GPU', 0)
+                _dbg(f"Node ip={_node_ip}, id={str(_node_id)[:16]}...: total_GPU={_total_gpu}")
+            _dbg("--- End PG overlap check ---")
+        except Exception as e:
+            _dbg(f"WARNING: PG overlap check failed: {e}")
+
+        # --- [RAY_EXECUTOR_DEBUG] nvidia-smi on local node before worker creation ---
+        try:
+            import subprocess
+            _nvsmi_result = subprocess.run(
+                ["nvidia-smi", "--query-gpu=index,memory.used,memory.total,utilization.gpu", "--format=csv,noheader,nounits"],
+                capture_output=True, text=True, timeout=5
+            )
+            _dbg(f"nvidia-smi on LOCAL node ({_my_node_ip}):")
+            for _line in _nvsmi_result.stdout.strip().split('\n'):
+                _dbg(f"  GPU {_line.strip()}")
+            if _nvsmi_result.returncode != 0:
+                _dbg(f"nvidia-smi stderr: {_nvsmi_result.stderr.strip()}")
+        except Exception as e:
+            _dbg(f"nvidia-smi failed: {e}")
+
+        # --- [RAY_EXECUTOR_DEBUG] Try nvidia-smi on REMOTE nodes via Ray remote ---
+        _first_remote_done = False
+        try:
+            @ray.remote(num_cpus=0.01)
+            def _remote_nvidia_smi():
+                import subprocess as _sp
+                import socket as _sk
+                _hostname = _sk.gethostname()
+                _r = _sp.run(
+                    ["nvidia-smi", "--query-gpu=index,memory.used,memory.total,utilization.gpu,gpu_uuid",
+                     "--format=csv,noheader,nounits"],
+                    capture_output=True, text=True, timeout=5
+                )
+                return _hostname, _r.stdout.strip(), _r.returncode, _r.stderr.strip()
+
+            # Run nvidia-smi on each unique node
+            _node_ips = set()
+            for node in ray.nodes():
+                if node.get('Alive'):
+                    _node_ips.add(node.get('NodeManagerAddress'))
+            _dbg(f"Running nvidia-smi on all {len(_node_ips)} nodes via Ray remote...")
+            _nvsmi_refs = [_remote_nvidia_smi.remote() for _ in range(len(_node_ips))]
+            _nvsmi_results = ray.get(_nvsmi_refs, timeout=15)
+            _seen_hosts = set()
+            for _hostname, _stdout, _rc, _stderr_out in _nvsmi_results:
+                if _hostname not in _seen_hosts:
+                    _seen_hosts.add(_hostname)
+                    _dbg(f"nvidia-smi on {_hostname}:")
+                    for _line in _stdout.split('\n'):
+                        _dbg(f"  GPU {_line.strip()}")
+                    if _rc != 0:
+                        _dbg(f"  stderr: {_stderr_out}")
+        except Exception as e:
+            _dbg(f"Remote nvidia-smi failed: {e}")
+
+        # --- [RAY_EXECUTOR_DEBUG] Check available resources RIGHT BEFORE worker creation ---
+        try:
+            _avail_now = ray.available_resources()
+            _dbg(f"Available resources RIGHT BEFORE worker creation: {_avail_now}")
+        except Exception as e:
+            _dbg(f"WARNING: Failed to check available resources: {e}")
 
         self.workers = []
+        _t_start_all = time.monotonic()
         for rank in range(self.world_size):
             pg = placement_groups[rank] if isinstance(
                 placement_groups, list) else placement_groups
-            logger.info(
-                f"[RAY_EXECUTOR_DEBUG] Creating worker rank={rank}, "
-                f"pg_id={id(pg)}, bundle_index={self.bundle_indices[rank]}, num_gpus={num_gpus}"
+
+            # Determine if this worker goes to a remote node
+            _target_node = _bundle_to_node.get(rank, 'unknown')
+            _is_remote = (_local_node_id is not None and _target_node != _local_node_id)
+            _node_label = "REMOTE" if _is_remote else "LOCAL"
+
+            _dbg(
+                f"Creating worker rank={rank}, "
+                f"pg_id={id(pg)}, bundle_index={self.bundle_indices[rank]}, num_gpus={num_gpus}, "
+                f"target_node={str(_target_node)[:16]}..., {_node_label}"
             )
+
+            # Log extra detail for the FIRST remote worker
+            if _is_remote and not _first_remote_done:
+                _first_remote_done = True
+                _dbg(f"=== FIRST REMOTE WORKER (rank={rank}) ===")
+                try:
+                    _avail_at_remote = ray.available_resources()
+                    _dbg(f"Available resources at first remote creation: {_avail_at_remote}")
+                except Exception:
+                    pass
+                # Log the placement group scheduling strategy details
+                _dbg(
+                    f"Scheduling: pg_id={id(pg)}, bundle_index={self.bundle_indices[rank]}, "
+                    f"num_gpus={num_gpus}, runtime_env keys={sorted(runtime_env.get('env_vars', {}).keys()) if isinstance(runtime_env, dict) else 'RuntimeEnv obj'}"
+                )
+
+            # Stagger remote-node worker creation to reduce contention
+            if _is_remote and rank > 0:
+                _stagger_delay = float(os.environ.get("TRTLLM_RAY_STAGGER_DELAY", "0.5"))
+                if _stagger_delay > 0:
+                    _dbg(f"Staggering remote worker rank={rank} by {_stagger_delay}s")
+                    time.sleep(_stagger_delay)
+
+            _t_before = time.monotonic()
             worker = RayWorkerWrapper.options(
                 num_gpus=num_gpus,
                 runtime_env=runtime_env,
@@ -210,97 +479,142 @@ class RayExecutor(RpcExecutorMixin, GenerationExecutor):
                     placement_group=pg,
                     placement_group_bundle_index=self.bundle_indices[rank],
                 )).remote(worker_cls, worker_kwargs, self.world_size, rank)
+            _t_after = time.monotonic()
+            _dbg(f"Worker rank={rank} actor created in {_t_after - _t_before:.3f}s (actor_id={worker._actor_id.hex() if hasattr(worker, '_actor_id') else 'N/A'})")
             self.workers.append(worker)
-        logger.info(f"[RAY_EXECUTOR_DEBUG] All {self.world_size} worker actors created (not yet ready)")
+
+        _t_end_all = time.monotonic()
+        _dbg(f"All {self.world_size} worker actors created in {_t_end_all - _t_start_all:.3f}s (not yet ready)")
 
     def init_workers_sync(self):
         self.create_workers(RayGPUWorker, self.worker_kwargs)
-        logger.info(f"[RAY_EXECUTOR_DEBUG] init_workers_sync: waiting for {len(self.workers)} workers...")
+        _dbg(f"init_workers_sync: waiting for {len(self.workers)} workers...")
+        _t_sync_start = time.monotonic()
         try:
             ray.get(self._get_worker_ready_futures())
         except ray.exceptions.ActorDiedError as e:
-            logger.error(f"[RAY_EXECUTOR_DEBUG] ActorDiedError in init_workers_sync: {e}")
+            _dbg(f"ActorDiedError in init_workers_sync after {time.monotonic()-_t_sync_start:.1f}s: {e}")
             # Check each worker's state
             for i, w in enumerate(self.workers):
                 try:
                     ray.get(w.__ray_ready__.remote(), timeout=2.0)
-                    logger.info(f"[RAY_EXECUTOR_DEBUG] Worker rank={i} is alive")
+                    _dbg(f"Worker rank={i} is alive")
                 except Exception as we:
-                    logger.error(f"[RAY_EXECUTOR_DEBUG] Worker rank={i} DEAD/UNREACHABLE: {type(we).__name__}: {we}")
+                    _dbg(f"Worker rank={i} DEAD/UNREACHABLE: {type(we).__name__}: {we}")
+            # Check cluster state at time of failure
+            try:
+                _nodes = ray.nodes()
+                for _n in _nodes:
+                    _dbg(f"Node at failure: ip={_n.get('NodeManagerAddress')}, alive={_n.get('Alive')}, resources={_n.get('Resources', {})}")
+            except Exception:
+                pass
             raise RuntimeError("RayGPUWorker died during initialization") from e
-        logger.info(f"[RAY_EXECUTOR_DEBUG] All workers ready (sync). Setting up TCP store...")
+        _dbg(f"All workers ready (sync) in {time.monotonic()-_t_sync_start:.1f}s. Setting up TCP store...")
         port = self.call_all_ray_workers("setup_tcp_store",
                                          leader_only=True,
                                          async_call=False)[0]
-        logger.info(f"[RAY_EXECUTOR_DEBUG] TCP store port={port}. Setting up distributed env...")
+        _dbg(f"TCP store port={port}. Setting up distributed env...")
         self.call_all_ray_workers("setup_distributed_env_and_worker",
                                   leader_only=False,
                                   async_call=False,
                                   port=port)
-        logger.info(f"[RAY_EXECUTOR_DEBUG] init_workers_sync complete.")
+        _dbg(f"init_workers_sync complete.")
 
     async def init_workers_async(self):
         self.create_workers(RayGPUWorker, self.worker_kwargs)
-        logger.info(f"[RAY_EXECUTOR_DEBUG] init_workers_async: waiting for {len(self.workers)} workers to be ready...")
+        _dbg(f"init_workers_async: waiting for {len(self.workers)} workers to be ready...")
+
+        # --- [RAY_EXECUTOR_DEBUG] Map future -> rank for identification ---
+        _t_wait_start = time.monotonic()
         try:
             ready_futures = self._get_worker_ready_futures()
+            _future_to_rank = {}
+            for i, f in enumerate(ready_futures):
+                _future_to_rank[f] = i
+            _dbg(f"init_workers_async: {len(ready_futures)} ready futures created, starting ray.wait loop")
+
             # Use ray.wait to identify which worker(s) fail first
             remaining = list(ready_futures)
             ready_count = 0
             while remaining:
-                ready, remaining = ray.wait(remaining, num_returns=1, timeout=60.0)
+                _dbg(f"ray.wait: {ready_count} ready, {len(remaining)} remaining, elapsed={time.monotonic()-_t_wait_start:.1f}s")
+                ready, remaining = ray.wait(remaining, num_returns=1, timeout=30.0)
                 if not ready:
-                    logger.warning(
-                        f"[RAY_EXECUTOR_DEBUG] Timeout waiting for workers. "
-                        f"{ready_count}/{len(self.workers)} ready, {len(remaining)} remaining"
+                    _dbg(
+                        f"Timeout (30s) waiting for workers. "
+                        f"{ready_count}/{len(self.workers)} ready, {len(remaining)} remaining, "
+                        f"total_elapsed={time.monotonic()-_t_wait_start:.1f}s"
                     )
-                    # Check each remaining worker's state
+                    # Check each worker's state individually
                     for i, w in enumerate(self.workers):
                         try:
-                            state = ray.get_actor(w._actor_id.hex()) if hasattr(w, '_actor_id') else "unknown"
+                            _aid = w._actor_id.hex() if hasattr(w, '_actor_id') else "no_id"
+                            _dbg(f"Worker rank={i} actor_id={_aid}")
                         except Exception:
-                            state = "lookup_failed"
-                        logger.info(f"[RAY_EXECUTOR_DEBUG] Worker {i} state: {state}")
+                            pass
+                    # Also check cluster resources
+                    try:
+                        _avail = ray.available_resources()
+                        _dbg(f"Available resources during wait: {_avail}")
+                    except Exception:
+                        pass
                     continue
                 try:
+                    # Identify which rank just became ready
+                    _ready_rank = _future_to_rank.get(ready[0], "unknown")
                     await asyncio.gather(*ready)
                     ready_count += 1
-                    logger.info(f"[RAY_EXECUTOR_DEBUG] Worker ready ({ready_count}/{len(self.workers)})")
+                    _dbg(f"Worker rank={_ready_rank} ready ({ready_count}/{len(self.workers)}, elapsed={time.monotonic()-_t_wait_start:.1f}s)")
                 except ray.exceptions.ActorDiedError as e:
-                    logger.error(
-                        f"[RAY_EXECUTOR_DEBUG] Worker died during init! "
+                    _failed_rank = _future_to_rank.get(ready[0], "unknown")
+                    _dbg(
+                        f"Worker rank={_failed_rank} DIED during init! "
                         f"ready_count={ready_count}/{len(self.workers)}, "
-                        f"error_type={type(e).__name__}, error={e}"
+                        f"elapsed={time.monotonic()-_t_wait_start:.1f}s, "
+                        f"error_type={type(e).__name__}"
                     )
+                    _dbg(f"ActorDiedError details: {e}")
+                    # Extract actor death cause if available
+                    if hasattr(e, 'actor_id'):
+                        _dbg(f"Dead actor_id={e.actor_id}")
+                    if hasattr(e, 'error_msg'):
+                        _dbg(f"Dead actor error_msg={e.error_msg}")
+
                     # Try to get more details about each worker
                     for i, w in enumerate(self.workers):
                         try:
-                            # Check if this worker is alive
                             ray.get(w.__ray_ready__.remote(), timeout=2.0)
-                            logger.info(f"[RAY_EXECUTOR_DEBUG] Worker rank={i} is alive")
+                            _dbg(f"Worker rank={i} is alive")
                         except ray.exceptions.ActorDiedError as we:
-                            logger.error(
-                                f"[RAY_EXECUTOR_DEBUG] Worker rank={i} DEAD: {we}"
-                            )
+                            _dbg(f"Worker rank={i} DEAD: {we}")
                         except ray.exceptions.GetTimeoutError:
-                            logger.warning(f"[RAY_EXECUTOR_DEBUG] Worker rank={i} timeout (may be pending)")
+                            _dbg(f"Worker rank={i} timeout (may be pending)")
                         except Exception as we:
-                            logger.warning(f"[RAY_EXECUTOR_DEBUG] Worker rank={i} check error: {type(we).__name__}: {we}")
+                            _dbg(f"Worker rank={i} check error: {type(we).__name__}: {we}")
+
+                    # Check cluster state at time of failure
+                    try:
+                        _nodes = ray.nodes()
+                        for _n in _nodes:
+                            _dbg(f"Node at failure: ip={_n.get('NodeManagerAddress')}, alive={_n.get('Alive')}, resources={_n.get('Resources', {})}")
+                    except Exception:
+                        pass
+
                     raise RuntimeError("RayGPUWorker died during initialization") from e
         except ray.exceptions.ActorDiedError as e:
-            logger.error(f"[RAY_EXECUTOR_DEBUG] ActorDiedError in init_workers_async: {e}")
+            _dbg(f"ActorDiedError in init_workers_async (outer): {e}")
             raise RuntimeError("RayGPUWorker died during initialization") from e
 
-        logger.info(f"[RAY_EXECUTOR_DEBUG] All workers ready. Setting up TCP store...")
+        _dbg(f"All workers ready. Setting up TCP store...")
         port = (await asyncio.gather(*self.call_all_ray_workers(
             "setup_tcp_store", leader_only=True, async_call=True)))[0]
-        logger.info(f"[RAY_EXECUTOR_DEBUG] TCP store on port={port}. Setting up distributed env...")
+        _dbg(f"TCP store on port={port}. Setting up distributed env...")
         await asyncio.gather(
             *self.call_all_ray_workers("setup_distributed_env_and_worker",
                                        leader_only=False,
                                        async_call=True,
                                        port=port))
-        logger.info(f"[RAY_EXECUTOR_DEBUG] init_workers_async complete.")
+        _dbg(f"init_workers_async complete.")
 
     @unwrap_ray_errors()
     def call_all_ray_workers(self, func: str, leader_only: bool,
@@ -511,15 +825,15 @@ class RayExecutor(RpcExecutorMixin, GenerationExecutor):
                         placement_config.placement_groups,
                         placement_config.placement_bundle_indices)):
                     pg_info = placement_group_table(pg)
-                    logger.info(
-                        f"[RAY_EXECUTOR_DEBUG] External PG[{i}]: state={pg_info.get('state', 'N/A')}, "
+                    _dbg(
+                        f"External PG[{i}]: state={pg_info.get('state', 'N/A')}, "
                         f"bundle_count={len(pg_info.get('bundles', []))}, "
                         f"bundles={pg_info.get('bundles', 'N/A')}, "
                         f"bundles_to_node_id={pg_info.get('bundles_to_node_id', 'N/A')}, "
                         f"assigned_indices={indices}"
                     )
             except Exception as e:
-                logger.warning(f"[RAY_EXECUTOR_DEBUG] Failed to inspect external PGs: {e}")
+                _dbg(f"WARNING: Failed to inspect external PGs: {e}")
 
             flat_pgs = []
             flat_indices = []
@@ -529,8 +843,8 @@ class RayExecutor(RpcExecutorMixin, GenerationExecutor):
                     flat_pgs.append(pg)
                     flat_indices.append(idx)
 
-            logger.info(
-                f"[RAY_EXECUTOR_DEBUG] External PGs flattened: "
+            _dbg(
+                f"External PGs flattened: "
                 f"{len(flat_pgs)} entries, flat_indices={flat_indices}"
             )
 

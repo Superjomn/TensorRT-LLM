@@ -1,21 +1,37 @@
+import sys as _sys
+print(f"[RAY_EXECUTOR_DEBUG] ray_gpu_worker.py MODULE LOAD START: pid={__import__('os').getpid()}", file=_sys.stderr, flush=True)
+
 import gc
 import importlib
 import os
+import sys
 from functools import wraps
 from pathlib import Path
 from queue import Queue
 from typing import Any, List, Optional, Type, Union
 
+print(f"[RAY_EXECUTOR_DEBUG] ray_gpu_worker.py: stdlib imports done, pid={os.getpid()}", file=sys.stderr, flush=True)
+
 import ray
+print(f"[RAY_EXECUTOR_DEBUG] ray_gpu_worker.py: ray imported, pid={os.getpid()}", file=sys.stderr, flush=True)
+
 import torch
+print(f"[RAY_EXECUTOR_DEBUG] ray_gpu_worker.py: torch imported, pid={os.getpid()}", file=sys.stderr, flush=True)
 
 from tensorrt_llm._ray_utils import control_action_decorator
+print(f"[RAY_EXECUTOR_DEBUG] ray_gpu_worker.py: _ray_utils imported, pid={os.getpid()}", file=sys.stderr, flush=True)
+
 from tensorrt_llm._torch.utils import get_device_uuid
+print(f"[RAY_EXECUTOR_DEBUG] ray_gpu_worker.py: _torch.utils imported, pid={os.getpid()}", file=sys.stderr, flush=True)
+
 from tensorrt_llm._torch.virtual_memory import (materialize_with_tag,
                                                 release_with_tag,
                                                 verify_sleep_wakeup_tags)
+print(f"[RAY_EXECUTOR_DEBUG] ray_gpu_worker.py: virtual_memory imported, pid={os.getpid()}", file=sys.stderr, flush=True)
 
 from ..bindings import executor as tllm
+print(f"[RAY_EXECUTOR_DEBUG] ray_gpu_worker.py: bindings.executor imported, pid={os.getpid()}", file=sys.stderr, flush=True)
+
 from ..builder import Engine
 from ..llmapi.llm_args import BaseLlmArgs
 from ..llmapi.tokenizer import TokenizerBase
@@ -25,6 +41,8 @@ from .postproc_worker import PostprocWorkerConfig
 from .request import GenerationRequest
 from .result import GenerationResult
 from .rpc_worker_mixin import RpcWorkerMixin
+
+print(f"[RAY_EXECUTOR_DEBUG] ray_gpu_worker.py MODULE LOAD COMPLETE: pid={os.getpid()}", file=sys.stderr, flush=True)
 
 __all__ = [
     "RayGPUWorker",
@@ -44,7 +62,6 @@ class RayWorkerWrapper:
 
     def __init__(self, worker_cls, worker_kwargs, world_size, rank):
         # --- [RAY_EXECUTOR_DEBUG] Very early print before any heavy imports ---
-        import sys
         print(
             f"[RAY_EXECUTOR_DEBUG] RayWorkerWrapper.__init__ START: rank={rank}, "
             f"world_size={world_size}, pid={os.getpid()}, "
@@ -54,39 +71,86 @@ class RayWorkerWrapper:
             file=sys.stderr, flush=True,
         )
 
-        self.master_address = os.environ["MASTER_ADDR"]
+        # Step 1: MASTER_ADDR lookup
+        print(f"[RAY_EXECUTOR_DEBUG] rank={rank}, pid={os.getpid()}: Step 1 - reading MASTER_ADDR", file=sys.stderr, flush=True)
+        try:
+            self.master_address = os.environ["MASTER_ADDR"]
+            print(f"[RAY_EXECUTOR_DEBUG] rank={rank}, pid={os.getpid()}: Step 1 OK - MASTER_ADDR={self.master_address}", file=sys.stderr, flush=True)
+        except Exception as e:
+            print(f"[RAY_EXECUTOR_DEBUG] rank={rank}, pid={os.getpid()}: EXCEPTION Step 1: {type(e).__name__}: {e}", file=sys.stderr, flush=True)
+            import traceback; traceback.print_exc(file=sys.stderr)
+            raise
+
         self.world_size = world_size
         self.rank = rank
-        # Ray can't pickle TensorRT logger
-        global logger
-        from tensorrt_llm.logger import logger
 
-        # Expect to see global counts w/ RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES=1,
-        # unless CUDA_VISIBLE_DEVICES is set.
-        logger.debug(
-            f"CUDA device count visible to Ray: {torch.cuda.device_count()}")
+        # Step 2: import tensorrt_llm.logger
+        print(f"[RAY_EXECUTOR_DEBUG] rank={rank}, pid={os.getpid()}: Step 2 - importing tensorrt_llm.logger", file=sys.stderr, flush=True)
+        try:
+            global logger
+            from tensorrt_llm.logger import logger
+            print(f"[RAY_EXECUTOR_DEBUG] rank={rank}, pid={os.getpid()}: Step 2 OK - logger imported", file=sys.stderr, flush=True)
+        except Exception as e:
+            print(f"[RAY_EXECUTOR_DEBUG] rank={rank}, pid={os.getpid()}: EXCEPTION Step 2: {type(e).__name__}: {e}", file=sys.stderr, flush=True)
+            import traceback; traceback.print_exc(file=sys.stderr)
+            raise
 
-        # Physical gpu id
-        ray_gpu_ids = ray.get_gpu_ids()
-        logger.info(
-            f"[RAY_EXECUTOR_DEBUG] rank={rank}, ray.get_gpu_ids()={ray_gpu_ids}, "
-            f"torch.cuda.device_count()={torch.cuda.device_count()}, "
-            f"CUDA_VISIBLE_DEVICES={os.environ.get('CUDA_VISIBLE_DEVICES', 'NOT_SET')}"
-        )
+        # Step 3: torch.cuda.device_count()
+        print(f"[RAY_EXECUTOR_DEBUG] rank={rank}, pid={os.getpid()}: Step 3 - calling torch.cuda.device_count()", file=sys.stderr, flush=True)
+        try:
+            _dev_count = torch.cuda.device_count()
+            print(f"[RAY_EXECUTOR_DEBUG] rank={rank}, pid={os.getpid()}: Step 3 OK - device_count={_dev_count}", file=sys.stderr, flush=True)
+        except Exception as e:
+            print(f"[RAY_EXECUTOR_DEBUG] rank={rank}, pid={os.getpid()}: EXCEPTION Step 3: {type(e).__name__}: {e}", file=sys.stderr, flush=True)
+            import traceback; traceback.print_exc(file=sys.stderr)
+            raise
 
-        self.gpu = int(ray_gpu_ids[0])
-        self.local_gpu = self.physical_to_local_id(self.gpu)
+        # Step 4: ray.get_gpu_ids()
+        print(f"[RAY_EXECUTOR_DEBUG] rank={rank}, pid={os.getpid()}: Step 4 - calling ray.get_gpu_ids()", file=sys.stderr, flush=True)
+        try:
+            ray_gpu_ids = ray.get_gpu_ids()
+            print(
+                f"[RAY_EXECUTOR_DEBUG] rank={rank}, pid={os.getpid()}: Step 4 OK - "
+                f"ray_gpu_ids={ray_gpu_ids}, device_count={_dev_count}",
+                file=sys.stderr, flush=True,
+            )
+        except Exception as e:
+            print(f"[RAY_EXECUTOR_DEBUG] rank={rank}, pid={os.getpid()}: EXCEPTION Step 4: {type(e).__name__}: {e}", file=sys.stderr, flush=True)
+            import traceback; traceback.print_exc(file=sys.stderr)
+            raise
 
-        logger.info(
-            f"[RAY_EXECUTOR_DEBUG] rank={rank}, physical_gpu={self.gpu}, "
-            f"local_gpu={self.local_gpu}"
-        )
+        # Step 5: physical_to_local_id
+        print(f"[RAY_EXECUTOR_DEBUG] rank={rank}, pid={os.getpid()}: Step 5 - physical_to_local_id({ray_gpu_ids[0]})", file=sys.stderr, flush=True)
+        try:
+            self.gpu = int(ray_gpu_ids[0])
+            self.local_gpu = self.physical_to_local_id(self.gpu)
+            print(f"[RAY_EXECUTOR_DEBUG] rank={rank}, pid={os.getpid()}: Step 5 OK - gpu={self.gpu}, local_gpu={self.local_gpu}", file=sys.stderr, flush=True)
+        except Exception as e:
+            print(f"[RAY_EXECUTOR_DEBUG] rank={rank}, pid={os.getpid()}: EXCEPTION Step 5: {type(e).__name__}: {e}", file=sys.stderr, flush=True)
+            import traceback; traceback.print_exc(file=sys.stderr)
+            raise
 
-        torch.cuda.set_device(self.local_gpu)
+        # Step 6: torch.cuda.set_device
+        print(f"[RAY_EXECUTOR_DEBUG] rank={rank}, pid={os.getpid()}: Step 6 - torch.cuda.set_device({self.local_gpu})", file=sys.stderr, flush=True)
+        try:
+            torch.cuda.set_device(self.local_gpu)
+            print(f"[RAY_EXECUTOR_DEBUG] rank={rank}, pid={os.getpid()}: Step 6 OK - device set", file=sys.stderr, flush=True)
+        except Exception as e:
+            print(f"[RAY_EXECUTOR_DEBUG] rank={rank}, pid={os.getpid()}: EXCEPTION Step 6: {type(e).__name__}: {e}", file=sys.stderr, flush=True)
+            import traceback; traceback.print_exc(file=sys.stderr)
+            raise
 
-        self.worker_cls = RayWorkerWrapper._inject_worker_extension(
-            worker_cls, worker_kwargs.pop("ray_worker_extension_cls", None))
-        self.worker_kwargs = worker_kwargs
+        # Step 7: _inject_worker_extension
+        print(f"[RAY_EXECUTOR_DEBUG] rank={rank}, pid={os.getpid()}: Step 7 - _inject_worker_extension", file=sys.stderr, flush=True)
+        try:
+            self.worker_cls = RayWorkerWrapper._inject_worker_extension(
+                worker_cls, worker_kwargs.pop("ray_worker_extension_cls", None))
+            self.worker_kwargs = worker_kwargs
+            print(f"[RAY_EXECUTOR_DEBUG] rank={rank}, pid={os.getpid()}: Step 7 OK - __init__ COMPLETE", file=sys.stderr, flush=True)
+        except Exception as e:
+            print(f"[RAY_EXECUTOR_DEBUG] rank={rank}, pid={os.getpid()}: EXCEPTION Step 7: {type(e).__name__}: {e}", file=sys.stderr, flush=True)
+            import traceback; traceback.print_exc(file=sys.stderr)
+            raise
 
     def _create_tcp_store(self,
                           port: Optional[int] = None

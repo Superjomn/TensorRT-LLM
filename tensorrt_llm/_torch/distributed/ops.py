@@ -751,21 +751,113 @@ class AllReduce(nn.Module):
                 "pg": pg.boxed(),
             }
 
-        output = self.all_reduce_op(
-            input=input,
-            residual=all_reduce_params.residual,
-            norm_weight=all_reduce_params.norm_weight,
-            scale=all_reduce_params.scale,
-            bias=all_reduce_params.bias,
-            workspace=self.workspace,
-            group=self.mapping.tp_group,
-            strategy=allreduce_strategy,
-            op=all_reduce_params.fusion_op,
-            eps=all_reduce_params.eps,
-            trigger_completion_at_end=all_reduce_params.
-            trigger_completion_at_end,
-            **additional_args,
-        )
+        # [RAY_EXECUTOR_DEBUG] Pre-allreduce tensor state dump
+        import sys
+        _dbg_pid = os.getpid()
+        _dbg_input_device = getattr(input, 'device', 'NO_DEVICE')
+        _dbg_input_shape = getattr(input, 'shape', 'NO_SHAPE')
+        _dbg_input_dtype = getattr(input, 'dtype', 'NO_DTYPE')
+        _dbg_input_contig = input.is_contiguous() if hasattr(input, 'is_contiguous') else 'N/A'
+        _dbg_input_is_cuda = input.is_cuda if hasattr(input, 'is_cuda') else 'N/A'
+        _dbg_input_data_ptr = input.data_ptr() if hasattr(input, 'data_ptr') else 'N/A'
+        _dbg_input_storage_size = input.storage().size() if hasattr(input, 'storage') else 'N/A'
+        print(f"[RAY_EXECUTOR_DEBUG] AllReduceOp.forward PRE-CALL pid={_dbg_pid} "
+              f"input.device={_dbg_input_device} input.shape={_dbg_input_shape} "
+              f"input.dtype={_dbg_input_dtype} input.is_contiguous={_dbg_input_contig} "
+              f"input.is_cuda={_dbg_input_is_cuda} input.data_ptr={_dbg_input_data_ptr} "
+              f"input.storage_size={_dbg_input_storage_size}",
+              file=sys.stderr, flush=True)
+        print(f"[RAY_EXECUTOR_DEBUG] AllReduceOp.forward STATE pid={_dbg_pid} "
+              f"_disable_mpi={self._disable_mpi} strategy={self.strategy} "
+              f"allreduce_strategy={allreduce_strategy} "
+              f"tp_size={self.mapping.tp_size} tp_rank={self.mapping.tp_rank} "
+              f"tp_group={self.mapping.tp_group}",
+              file=sys.stderr, flush=True)
+        _dbg_ws = self.workspace
+        if _dbg_ws is not None:
+            print(f"[RAY_EXECUTOR_DEBUG] AllReduceOp.forward WORKSPACE pid={_dbg_pid} "
+                  f"device={getattr(_dbg_ws, 'device', 'NO_DEVICE')} "
+                  f"shape={getattr(_dbg_ws, 'shape', 'NO_SHAPE')} "
+                  f"dtype={getattr(_dbg_ws, 'dtype', 'NO_DTYPE')}",
+                  file=sys.stderr, flush=True)
+        else:
+            print(f"[RAY_EXECUTOR_DEBUG] AllReduceOp.forward WORKSPACE pid={_dbg_pid} workspace=None",
+                  file=sys.stderr, flush=True)
+        if self._disable_mpi:
+            print(f"[RAY_EXECUTOR_DEBUG] AllReduceOp.forward MPI_DISABLED pid={_dbg_pid} "
+                  f"tp_group_pg={self.mapping.tp_group_pg} "
+                  f"dist_rank={torch.distributed.get_rank()} "
+                  f"additional_args_keys={list(additional_args.keys())}",
+                  file=sys.stderr, flush=True)
+        # Log residual/norm_weight/scale/bias devices
+        for _name, _val in [("residual", all_reduce_params.residual),
+                            ("norm_weight", all_reduce_params.norm_weight),
+                            ("scale", all_reduce_params.scale),
+                            ("bias", all_reduce_params.bias)]:
+            if _val is not None:
+                print(f"[RAY_EXECUTOR_DEBUG] AllReduceOp.forward PARAM pid={_dbg_pid} "
+                      f"{_name}.device={getattr(_val, 'device', 'NO_DEVICE')} "
+                      f"{_name}.shape={getattr(_val, 'shape', 'NO_SHAPE')} "
+                      f"{_name}.dtype={getattr(_val, 'dtype', 'NO_DTYPE')}",
+                      file=sys.stderr, flush=True)
+
+        # WAR: allreduce_pg C++ op does not handle None for optional tensors
+        if self._disable_mpi:
+            _empty = torch.empty(0, device=input.device, dtype=input.dtype)
+            _residual = all_reduce_params.residual if all_reduce_params.residual is not None else _empty
+            _norm_weight = all_reduce_params.norm_weight if all_reduce_params.norm_weight is not None else _empty
+            _scale = all_reduce_params.scale if all_reduce_params.scale is not None else _empty
+            _bias = all_reduce_params.bias if all_reduce_params.bias is not None else _empty
+        else:
+            _residual = all_reduce_params.residual
+            _norm_weight = all_reduce_params.norm_weight
+            _scale = all_reduce_params.scale
+            _bias = all_reduce_params.bias
+
+        try:
+            output = self.all_reduce_op(
+                input=input,
+                residual=_residual,
+                norm_weight=_norm_weight,
+                scale=_scale,
+                bias=_bias,
+                workspace=self.workspace,
+                group=self.mapping.tp_group,
+                strategy=allreduce_strategy,
+                op=all_reduce_params.fusion_op,
+                eps=all_reduce_params.eps,
+                trigger_completion_at_end=all_reduce_params.
+                trigger_completion_at_end,
+                **additional_args,
+            )
+        except RuntimeError as e:
+            print(f"[RAY_EXECUTOR_DEBUG] AllReduceOp.forward CRASHED pid={_dbg_pid} "
+                  f"error={e}", file=sys.stderr, flush=True)
+            print(f"[RAY_EXECUTOR_DEBUG] AllReduceOp.forward CRASH_DUMP pid={_dbg_pid} "
+                  f"input.device={_dbg_input_device} input.shape={_dbg_input_shape} "
+                  f"input.dtype={_dbg_input_dtype} input.is_cuda={_dbg_input_is_cuda} "
+                  f"input.data_ptr={_dbg_input_data_ptr} "
+                  f"_disable_mpi={self._disable_mpi} "
+                  f"allreduce_strategy={allreduce_strategy} "
+                  f"all_reduce_op={self.all_reduce_op} "
+                  f"tp_size={self.mapping.tp_size} tp_rank={self.mapping.tp_rank} "
+                  f"tp_group={self.mapping.tp_group}",
+                  file=sys.stderr, flush=True)
+            if _dbg_ws is not None:
+                print(f"[RAY_EXECUTOR_DEBUG] AllReduceOp.forward CRASH_WORKSPACE pid={_dbg_pid} "
+                      f"ws.device={getattr(_dbg_ws, 'device', 'NO_DEVICE')} "
+                      f"ws.shape={getattr(_dbg_ws, 'shape', 'NO_SHAPE')} "
+                      f"ws.is_cuda={getattr(_dbg_ws, 'is_cuda', 'N/A')}",
+                      file=sys.stderr, flush=True)
+            # Dump all arg devices for completeness
+            for _name, _val in [("residual", all_reduce_params.residual),
+                                ("norm_weight", all_reduce_params.norm_weight),
+                                ("scale", all_reduce_params.scale),
+                                ("bias", all_reduce_params.bias)]:
+                _dev = getattr(_val, 'device', 'None') if _val is not None else 'None(param)'
+                print(f"[RAY_EXECUTOR_DEBUG] AllReduceOp.forward CRASH_PARAM pid={_dbg_pid} "
+                      f"{_name}.device={_dev}", file=sys.stderr, flush=True)
+            raise
 
         return output if len(output) > 1 else output[0]
 
